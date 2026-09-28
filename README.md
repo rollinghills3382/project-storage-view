@@ -15,9 +15,18 @@ consumers are obvious at a glance. Click into any block to drill down further.
 - Drill down: click an application or folder to see what is inside it.
 - Stay fast on large drives (incremental results while scanning).
 
+## Design decisions
+
+- **Platform:** Windows only.
+- **Visualization:** squarified treemap. Area is proportional to bytes on disk; top-level
+  blocks show one level of children inside them, and clicking a block zooms in.
+- **Grouping:** files are grouped by the application that owns them, including data outside
+  its install folder (for example Docker's WSL disk in `AppData`, or Adobe's media cache).
+  The detail panel lists every location an app occupies.
+
 ## Status
 
-Early design phase. See [`mockups/`](mockups/) for the UI concepts under review.
+Design phase. See [`mockups/`](mockups/) for the current UI mockup.
 
 ## Repository layout
 
