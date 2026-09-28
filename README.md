@@ -27,7 +27,8 @@ npm test               # Rust unit tests
 | Scanner | `src-tauri/src/scan.rs` | Parallel directory walk (rayon) into a compact tree. Files under 1 MB are bundled per folder. Skips junctions and symlinks; counts cloud-only OneDrive files as 0 bytes. |
 | App detection | `src-tauri/src/apps.rs` | Reads installed apps and their install folders from the Windows uninstall registry; assigns categories. |
 | Grouping | `src-tauri/src/grouping.rs` | Each app claims its install folder plus matching folders in `AppData` and `ProgramData`. Apps side by side under a publisher folder (`Program Files\Adobe\…`) become one block. Claimed folders are removed from where they sit, so nothing is counted twice. |
-| Commands | `src-tauri/src/lib.rs` | `list_drives`, `start_scan` (with progress events), `cancel_scan`, `get_node`. |
+| Commands | `src-tauri/src/lib.rs` | `list_drives`, `start_scan` (with progress events), `cancel_scan`, `get_node`, `app_status`, `restart_as_admin`. |
+| Elevation | `src-tauri/src/elevation.rs` | Detects administrator rights and relaunches through the UAC prompt with `--scan C:` so the new window resumes the same drive. |
 | UI | `src/main.ts`, `src/treemap.ts` | Drive picker, treemap (d3-hierarchy squarified layout), breadcrumb, detail panel. |
 
 ### Checking grouping without the UI
@@ -55,5 +56,9 @@ with `npm run dev` (see `src/devmock.ts`). `devdata/` is gitignored.
   full size.
 - Hard links (common in `C:\Windows\WinSxS`) are counted once per link, so `Windows` can read
   higher than its real footprint.
-- Without administrator rights some folders can't be read; the status bar shows how many.
+- Without administrator rights some folders can't be read. The status bar shows how many and
+  offers **Restart as administrator**. A few folders (such as `System Volume Information`) stay
+  unreadable even then.
+- Under `npm run tauri dev`, restarting as administrator leaves the original window open,
+  because closing it would stop the dev server the new window loads from.
 - Store (UWP/MSIX) apps aren't in the uninstall registry, so they show as folders instead of apps.

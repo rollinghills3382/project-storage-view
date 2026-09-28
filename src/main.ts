@@ -32,6 +32,7 @@ const state = {
   trail: [] as ViewNode[],
   selected: null as ViewNode | null,
   scanning: null as { drive: string; progress: ScanProgress | null } | null,
+  elevated: false,
   error: "",
 };
 
@@ -66,6 +67,19 @@ async function startScan(drive: Drive) {
     state.error = String(e);
     render();
   }
+}
+
+/** Relaunches through the UAC prompt; the new window picks up scanning `drive`. */
+async function restartAsAdmin(drive: Drive | null) {
+  try {
+    await invoke("restart_as_admin", { scan: drive?.mount ?? null });
+  } catch (e) {
+    toast(e === "cancelled" ? "Administrator access wasn't granted. Storage View keeps running as before." : String(e));
+  }
+}
+
+function adminButton(drive: Drive | null) {
+  return h("button", { class: "btn admin", title: "Opens a Windows prompt asking for administrator access", onclick: () => restartAsAdmin(drive) }, h("span", { class: "shield", "aria-hidden": "true" }), "Restart as administrator");
 }
 
 async function showDrive(drive: Drive) {
@@ -160,6 +174,13 @@ function renderPicker() {
     { class: "picker" },
     h("h1", {}, "Choose a drive to scan"),
     h("p", { class: "sub" }, "Storage View only reads file sizes. It never changes or deletes anything."),
+    !state.elevated &&
+      h(
+        "div",
+        { class: "admin-note" },
+        h("p", {}, "Some system folders can only be read with administrator rights. Without them, their space shows as “Not readable”."),
+        adminButton(null),
+      ),
     state.error && h("p", { class: "error", role: "alert" }, state.error),
     h(
       "div",
@@ -403,10 +424,15 @@ function renderStatus() {
   const bar = h("footer", { class: "statusbar" });
   if (state.screen === "map" && s) {
     bar.append(h("span", {}, `${fmtCount(s.files)} files in ${fmtCount(s.dirs)} folders · scanned in ${(s.elapsed_ms / 1000).toFixed(1)} s`));
-    if (s.denied) bar.append(h("span", { class: "warn" }, `${fmtCount(s.denied)} folders couldn't be read. Run Storage View as administrator to include them.`));
+    if (s.denied && !state.elevated) {
+      bar.append(h("span", { class: "warn" }, `${fmtCount(s.denied)} folders couldn't be read.`, adminButton(state.drive)));
+    } else if (s.denied) {
+      bar.append(h("span", {}, `${fmtCount(s.denied)} folders are protected by Windows even from administrators.`));
+    }
   } else {
     bar.append(h("span", {}, state.scanning ? "Scanning…" : `${state.drives.length} drives found`));
   }
+  if (state.elevated) bar.append(h("span", { class: "badge" }, h("span", { class: "shield", "aria-hidden": "true" }), "Administrator"));
   return bar;
 }
 
@@ -446,12 +472,17 @@ async function boot() {
     render();
   });
 
+  const status = await invoke<{ elevated: boolean; startup_scan: string | null }>("app_status");
+  state.elevated = status.elevated;
   try {
     await refreshDrives();
   } catch (e) {
     state.error = `Couldn't list drives: ${e}`;
   }
-  render();
+  // After restarting as administrator, carry on with the drive the user was looking at.
+  const resume = state.drives.find((d) => d.mount.toUpperCase() === status.startup_scan?.toUpperCase());
+  if (resume) await startScan(resume);
+  else render();
 }
 
 boot();

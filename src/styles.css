@@ -172,7 +172,15 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .row .meter { grid-column: 1 / -1; height: 4px; }
 
 .statusbar { display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; padding: 5px 14px; border-top: 1px solid var(--line); background: var(--surface-2); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.statusbar .warn { color: var(--warn); }
+.statusbar .warn { color: var(--warn); display: inline-flex; align-items: center; gap: 10px; }
+.statusbar .btn { padding: 1px 8px; font-size: 12px; }
+.badge { display: inline-flex; align-items: center; gap: 5px; color: var(--fg); font-weight: 500; }
+
+/* Administrator rights */
+.admin-note { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0 0 18px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); font-size: 13px; }
+.admin-note p { margin: 0; flex: 1 1 320px; color: var(--muted); }
+/* The Windows UAC shield, drawn in CSS so it follows the theme. */
+.shield { width: 11px; height: 13px; flex: none; display: inline-block; background: linear-gradient(90deg, var(--c-dev) 50%, var(--warn) 50%); clip-path: polygon(50% 0, 100% 18%, 100% 55%, 50% 100%, 0 55%, 0 18%); }
 
 .toast { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); background: var(--ink); color: var(--ink-fg); padding: 8px 14px; border-radius: 6px; font-size: 13px; z-index: 10; box-shadow: var(--shadow); }
 

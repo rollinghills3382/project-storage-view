@@ -19,6 +19,10 @@ export async function install() {
     (cmd, args) => {
       const a = args as Record<string, string>;
       switch (cmd) {
+        case "app_status":
+          return { elevated: false, startup_scan: null };
+        case "restart_as_admin":
+          throw "Restarting as administrator only works in the desktop app.";
         case "list_drives":
           return [dump.drive];
         case "start_scan":

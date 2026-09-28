@@ -3281,6 +3281,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tempfile",
+ "windows-sys 0.61.2",
  "winreg 0.56.0",
 ]
 

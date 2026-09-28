@@ -1,5 +1,6 @@
 pub mod apps;
 pub mod drives;
+mod elevation;
 pub mod grouping;
 pub mod scan;
 
@@ -36,6 +37,36 @@ struct ScanSummary {
     /// Folders Windows would not let us read (usually needs administrator rights).
     denied: u64,
     elapsed_ms: u64,
+}
+
+#[derive(Serialize)]
+struct AppStatus {
+    elevated: bool,
+    /// Drive to scan right away, set when the app restarted itself as administrator.
+    startup_scan: Option<String>,
+}
+
+#[tauri::command]
+fn app_status() -> AppStatus {
+    AppStatus { elevated: elevation::is_elevated(), startup_scan: elevation::startup_scan(std::env::args()) }
+}
+
+/// Relaunches with administrator rights (Windows shows the UAC prompt) and closes this window.
+/// `scan` is the drive the new window should scan as soon as it opens.
+#[tauri::command]
+fn restart_as_admin(app: AppHandle, scan: Option<String>) -> Result<(), String> {
+    let args = scan.as_deref().map(elevation::scan_args).unwrap_or_default();
+    match elevation::relaunch_elevated(&args) {
+        Ok(()) => {
+            // Under `tauri dev`, exiting would also stop the dev server the new window loads from.
+            if !cfg!(debug_assertions) {
+                app.exit(0);
+            }
+            Ok(())
+        }
+        Err(elevation::RelaunchError::Cancelled) => Err("cancelled".into()),
+        Err(elevation::RelaunchError::Failed(e)) => Err(format!("Couldn't restart as administrator: {e}")),
+    }
 }
 
 #[tauri::command]
@@ -128,7 +159,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![list_drives, start_scan, cancel_scan, get_node])
+        .invoke_handler(tauri::generate_handler![app_status, restart_as_admin, list_drives, start_scan, cancel_scan, get_node])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
