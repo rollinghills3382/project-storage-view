@@ -1,0 +1,711 @@
+<title>Storage View Mockups</title>
+<meta name="description" content="Clickable UI mockups for Storage View: drive picker plus three ways to visualize disk usage.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<style>
+/* Layout: a desktop-app window centered on a quiet page; sidebar | visualization | detail panel. */
+:root {
+  --bg: #eef1f5;
+  --surface: #ffffff;
+  --surface-2: #f5f7fa;
+  --fg: #16202b;
+  --muted: #5a6676;
+  --line: #dbe1e9;
+  --ink: #1b2533;
+  --ink-fg: #ffffff;
+  --free: #e3e8ef;
+  --free-stripe: #d2d9e3;
+  --shade: rgba(8, 12, 20, .30);
+  --halo: rgba(8, 12, 20, .55);
+  --on-cat: #ffffff;
+  --shadow: 0 1px 2px rgba(20, 30, 45, .06), 0 12px 32px -12px rgba(20, 30, 45, .18);
+
+  --c-games: #6a4cc7;
+  --c-creative: #c03d68;
+  --c-dev: #2767ad;
+  --c-productivity: #2a834a;
+  --c-media: #bd5a1c;
+  --c-user: #0d6f8a;
+  --c-system: #58616f;
+
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1319; --surface: #161d25; --surface-2: #1c242e; --fg: #e5eaf0; --muted: #95a1b1;
+    --line: #28323e; --ink: #e5eaf0; --ink-fg: #121820; --free: #222b36; --free-stripe: #2c3642;
+    --shade: rgba(0, 0, 0, .34); --halo: rgba(0, 0, 0, .6);
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 16px 40px -16px rgba(0, 0, 0, .6);
+    --c-games: #7a5ddb; --c-creative: #cc4d77; --c-dev: #3478c2; --c-productivity: #339457;
+    --c-media: #c9672a; --c-user: #17819e; --c-system: #667080;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1319; --surface: #161d25; --surface-2: #1c242e; --fg: #e5eaf0; --muted: #95a1b1;
+  --line: #28323e; --ink: #e5eaf0; --ink-fg: #121820; --free: #222b36; --free-stripe: #2c3642;
+  --shade: rgba(0, 0, 0, .34); --halo: rgba(0, 0, 0, .6);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 16px 40px -16px rgba(0, 0, 0, .6);
+  --c-games: #7a5ddb; --c-creative: #cc4d77; --c-dev: #3478c2; --c-productivity: #339457;
+  --c-media: #c9672a; --c-user: #17819e; --c-system: #667080;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--f-body); font-size: 14px; line-height: 1.5;
+  padding: 32px 20px 64px;
+}
+.page { max-width: 1280px; margin: 0 auto; display: grid; gap: 20px; }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+/* Page header */
+.eyebrow { margin: 0; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+h1 { margin: 4px 0 6px; font-family: var(--f-display); font-weight: 600; font-size: clamp(26px, 3.4vw, 36px); line-height: 1.1; text-wrap: balance; letter-spacing: -.01em; }
+.lede { margin: 0; max-width: 68ch; color: var(--muted); }
+.lede b { color: var(--fg); font-weight: 600; }
+
+/* Concept tabs */
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tab {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 999px;
+  padding: 6px 14px; font-weight: 500; font-size: 13px;
+}
+.tab:hover { border-color: var(--muted); }
+.tab[aria-selected="true"] { background: var(--ink); color: var(--ink-fg); border-color: var(--ink); }
+.tab .k { font-family: var(--f-mono); opacity: .7; margin-right: 4px; }
+
+/* App window */
+.window {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow); overflow: hidden; display: flex; flex-direction: column;
+}
+.titlebar {
+  display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 0 0 14px;
+  border-bottom: 1px solid var(--line); background: var(--surface-2); font-size: 12.5px;
+}
+.titlebar .appname { font-weight: 600; }
+.titlebar .where { color: var(--muted); font-family: var(--f-mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.titlebar .caption { margin-left: auto; display: flex; height: 100%; }
+.titlebar .caption span { width: 44px; display: grid; place-items: center; color: var(--muted); }
+.logo { width: 16px; height: 16px; flex: none; }
+
+.win-body { position: relative; height: 640px; min-height: 0; }
+.statusbar {
+  display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between;
+  padding: 6px 14px; border-top: 1px solid var(--line); background: var(--surface-2);
+  font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.pill-example { font-family: var(--f-mono); font-size: 11px; border: 1px dashed var(--muted); border-radius: 4px; padding: 0 6px; }
+
+/* Picker */
+.picker { height: 100%; overflow: auto; padding: 36px clamp(16px, 4vw, 48px); display: grid; align-content: start; gap: 6px; }
+.picker h2 { margin: 0; font-family: var(--f-display); font-weight: 600; font-size: 22px; }
+.picker .sub { margin: 0 0 18px; color: var(--muted); }
+.dcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.dcard { border: 1px solid var(--line); border-radius: 8px; padding: 18px; display: grid; gap: 12px; background: var(--surface); }
+.dcard-head { display: flex; gap: 12px; align-items: center; }
+.dcard-head svg { width: 38px; height: 38px; flex: none; color: var(--muted); }
+.dcard h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.dcard-head p { margin: 0; color: var(--muted); font-size: 12.5px; }
+.nums { display: flex; justify-content: space-between; margin: 0; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.nums b { color: var(--fg); font-weight: 600; }
+.scan { display: grid; gap: 6px; }
+.scan-track { height: 6px; border-radius: 3px; background: var(--free); overflow: hidden; }
+.scan-track i { display: block; height: 100%; width: 0; background: var(--ink); }
+.scan-text { margin: 0; font-family: var(--f-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Usage bar (shared) */
+.ubar {
+  display: flex; height: 10px; border-radius: 3px; overflow: hidden;
+  background: repeating-linear-gradient(135deg, var(--free) 0 5px, var(--free-stripe) 5px 7px);
+}
+.ubar span { height: 100%; border-right: 1px solid var(--surface); }
+.ubar span:last-child { border-right: 0; }
+
+/* Buttons */
+.btn {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 6px;
+  padding: 6px 12px; font-size: 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:hover:not(:disabled) { border-color: var(--muted); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.primary { background: var(--ink); color: var(--ink-fg); border-color: var(--ink); justify-content: center; }
+
+/* Main app layout */
+.app { height: 100%; display: grid; grid-template-columns: 210px minmax(0, 1fr) 280px; min-height: 0; }
+.drives { border-right: 1px solid var(--line); padding: 14px 10px; display: flex; flex-direction: column; gap: 4px; overflow: auto; }
+.side-h { margin: 0 6px 6px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.drive-btn {
+  text-align: left; border: 1px solid transparent; background: none; border-radius: 6px;
+  padding: 8px; display: grid; gap: 5px;
+}
+.drive-btn:hover { background: var(--surface-2); }
+.drive-btn[aria-current="true"] { background: var(--surface-2); border-color: var(--line); }
+.drive-btn .dn { font-weight: 600; font-size: 13px; display: flex; justify-content: space-between; gap: 6px; }
+.drive-btn .dn span { font-family: var(--f-mono); font-weight: 400; color: var(--muted); font-size: 12px; }
+.drive-btn .ubar { height: 6px; }
+.drive-btn .dm { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.drives .btn { margin-top: auto; justify-content: center; }
+
+.stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
+.crumbs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; font-size: 13px; }
+.crumbs button { border: 0; background: none; padding: 3px 6px; border-radius: 4px; white-space: nowrap; color: var(--muted); }
+.crumbs button:hover { background: var(--surface-2); color: var(--fg); }
+.crumbs button[aria-current="page"] { color: var(--fg); font-weight: 600; cursor: default; background: none; }
+.crumbs .sep { color: var(--muted); opacity: .6; }
+.toolbar .total { margin-left: auto; font-family: var(--f-mono); font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+
+.usage { padding: 10px 14px 8px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.legend b { color: var(--fg); font-weight: 500; }
+.legend .free i { background: repeating-linear-gradient(135deg, var(--free) 0 2px, var(--free-stripe) 2px 4px); outline: 1px solid var(--free-stripe); }
+
+.viz { position: relative; flex: 1; min-height: 0; margin: 10px; }
+.viz svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.cell { cursor: pointer; stroke: transparent; stroke-width: 2; transition: stroke .12s; }
+.cell:hover { stroke: var(--fg); }
+.cell.sel { stroke: var(--fg); stroke-width: 3; }
+.shade { fill: var(--shade); pointer-events: none; }
+.lbl { fill: var(--on-cat); font-size: 12.5px; font-weight: 600; pointer-events: none; }
+.lbl.sm { font-size: 11px; font-weight: 500; }
+.lbl .sz { font-family: var(--f-mono); font-weight: 400; font-size: 11px; opacity: .85; }
+.lbl.halo { paint-order: stroke; stroke: var(--halo); stroke-width: 3px; stroke-linejoin: round; }
+.hub { fill: var(--surface-2); stroke: var(--line); }
+.hub-t { fill: var(--fg); font-weight: 600; font-size: 13px; pointer-events: none; }
+.hub-s { fill: var(--muted); font-family: var(--f-mono); font-size: 12px; pointer-events: none; }
+.hub-up { fill: var(--muted); font-size: 11px; pointer-events: none; }
+.hub.clickable { cursor: pointer; }
+.hub.clickable:hover { stroke: var(--fg); }
+
+.tip {
+  position: absolute; left: 0; top: 0; pointer-events: none; z-index: 2;
+  background: var(--ink); color: var(--ink-fg); border-radius: 6px; padding: 7px 10px;
+  font-size: 12px; max-width: 260px; display: grid; gap: 1px; box-shadow: var(--shadow);
+}
+.tip b { font-weight: 600; }
+.tip span { font-family: var(--f-mono); font-size: 11.5px; opacity: .85; }
+.tip em { font-style: normal; opacity: .7; font-size: 11.5px; }
+
+/* Detail panel */
+.detail { border-left: 1px solid var(--line); padding: 16px; overflow: auto; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.detail h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.kind { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px 1px 6px; color: var(--fg); }
+.chip i { width: 8px; height: 8px; border-radius: 2px; }
+.big { font-family: var(--f-mono); font-size: 30px; font-weight: 500; line-height: 1; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.share { display: grid; gap: 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.meter { height: 6px; border-radius: 3px; background: var(--free); overflow: hidden; }
+.meter i { display: block; height: 100%; }
+.path { font-family: var(--f-mono); font-size: 11.5px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; overflow-wrap: anywhere; margin: 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.note-sys { margin: 0; font-size: 12px; color: var(--muted); }
+.inside h3 { margin: 0 0 6px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.inside ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.row {
+  width: 100%; text-align: left; border: 0; background: none; border-radius: 5px; padding: 5px 6px;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; font-size: 12.5px;
+}
+.row:hover { background: var(--surface-2); }
+.row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .sz { font-family: var(--f-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.row .meter { grid-column: 1 / -1; height: 4px; }
+
+/* Notes below the window */
+.notes { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 20px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; }
+.card h2 { margin: 0 0 8px; font-family: var(--f-display); font-weight: 600; font-size: 19px; }
+.card p { margin: 0 0 10px; max-width: 68ch; }
+.pc { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 12px; }
+.pc h3 { margin: 0 0 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.pc ul, .qs { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+.qs li::marker { font-family: var(--f-mono); color: var(--muted); }
+
+.toast {
+  position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+  background: var(--ink); color: var(--ink-fg); padding: 8px 14px; border-radius: 6px; font-size: 13px; z-index: 10; box-shadow: var(--shadow);
+}
+
+/* Responsive */
+@media (max-width: 1100px) {
+  .app { grid-template-columns: 190px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .detail { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); max-height: 260px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-content: start; }
+  .win-body { height: 860px; }
+}
+@media (max-width: 760px) {
+  body { padding: 20px 16px 48px; }
+  .win-body { height: auto; }
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
+  .drives { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px; }
+  .drives .side-h { display: none; }
+  .drive-btn { min-width: 150px; }
+  .drives .btn { margin-top: 0; white-space: nowrap; }
+  .viz { flex: none; height: 380px; }
+  .detail { grid-column: auto; max-height: none; display: flex; }
+  .notes, .pc { grid-template-columns: minmax(0, 1fr); }
+  .titlebar .caption { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .cell { transition: none; } }
+</style>
+
+<div class="page">
+  <header>
+    <p class="eyebrow">Storage View · UI mockups · round 1</p>
+    <h1>How Storage View could look</h1>
+    <p class="lede">Everything inside the window is clickable. Start with the <b>drive picker</b>, then compare three ways of drawing the same scan, where on-screen size stands for size on disk. The drives, apps and numbers are <b>example data</b>, not a scan of your machine.</p>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Mockup screens">
+    <button class="tab" role="tab" data-view="picker" id="tab-picker"><span class="k">1</span>Drive picker</button>
+    <button class="tab" role="tab" data-view="treemap" id="tab-treemap"><span class="k">2A</span>Treemap</button>
+    <button class="tab" role="tab" data-view="sunburst" id="tab-sunburst"><span class="k">2B</span>Sunburst</button>
+    <button class="tab" role="tab" data-view="bubbles" id="tab-bubbles"><span class="k">2C</span>Bubbles</button>
+  </nav>
+
+  <section class="window" aria-label="Storage View app mockup">
+    <div class="titlebar">
+      <svg class="logo" viewBox="0 0 16 16" aria-hidden="true"><rect x="1" y="1" width="8" height="14" rx="1.5" style="fill:var(--c-dev)"/><rect x="10" y="1" width="5" height="8" rx="1.5" style="fill:var(--c-creative)"/><rect x="10" y="10" width="5" height="5" rx="1.5" style="fill:var(--c-games)"/></svg>
+      <span class="appname">Storage View</span>
+      <span class="where" id="where"></span>
+      <span class="caption" aria-hidden="true"><span>&#8212;</span><span>&#9633;</span><span>&#10005;</span></span>
+    </div>
+    <div class="win-body">
+      <div class="picker" id="picker" hidden></div>
+      <div class="app" id="app" hidden>
+        <aside class="drives" id="drives" aria-label="Drives"></aside>
+        <div class="stage">
+          <div class="toolbar">
+            <button class="btn" id="up" title="Up one level (Esc)">&#8593; Up</button>
+            <nav class="crumbs" id="crumbs" aria-label="Location"></nav>
+            <span class="total" id="total"></span>
+          </div>
+          <div class="usage" id="usage"></div>
+          <div class="viz" id="viz">
+            <svg id="svg" role="img" aria-label="Disk usage visualization"></svg>
+            <div class="tip" id="tip" hidden></div>
+          </div>
+        </div>
+        <aside class="detail" id="detail" aria-label="Details"></aside>
+      </div>
+    </div>
+    <div class="statusbar" id="status"></div>
+  </section>
+
+  <section class="notes">
+    <div class="card" id="concept"></div>
+    <div class="card">
+      <h2>Questions for you</h2>
+      <ol class="qs">
+        <li><b>Main view:</b> which of A, B or C should be the default? Shipping two behind a toggle is also an option.</li>
+        <li><b>Grouping:</b> these mockups gather everything an app owns into one block, even files outside Program Files (Docker's WSL disk, Adobe's media cache, Spotify downloads). Keep that, or show plain folders only?</li>
+        <li><b>Free space:</b> show it only in the bar at the top (as now), or also as a block inside the visualization?</li>
+        <li><b>Actions:</b> view-only, or should it offer Uninstall and Move to Recycle Bin from the detail panel?</li>
+        <li><b>Platforms:</b> Windows only for now, or macOS and Linux too? This decides the tech stack.</li>
+        <li><b>Look:</b> colors are grouped by category (Games, Development, and so on). Would you rather color by file type or by age?</li>
+      </ol>
+    </div>
+  </section>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+const CATS = { games: 'Games', creative: 'Creative', dev: 'Development', productivity: 'Apps & tools', media: 'Media', user: 'Your files', system: 'System' };
+const U = 'C:\\Users\\You';
+
+// Example data. Sizes are in GB (decimal).
+const DRIVES = [
+  { letter: 'C:', name: 'Local Disk', kind: 'NVMe SSD', capacity: 1000, files: 412118, secs: 9.4, children: [
+    { name: 'Your files', cat: 'user', type: 'Folder', path: U, children: [
+      { name: 'Videos', children: [{ name: 'Screen recordings', size: 71.3 }, { name: 'Exports', size: 24.6 }] },
+      { name: 'Downloads', children: [{ name: 'Installers', size: 21.2 }, { name: 'Archives (.zip, .7z)', size: 14.4 }, { name: 'Everything else', size: 8.9 }] },
+      { name: 'OneDrive', size: 31.0 },
+      { name: 'Pictures', children: [{ name: 'Camera roll', size: 19.5 }, { name: 'Screenshots', size: 7.4 }] },
+      { name: 'Documents', size: 17.8 },
+      { name: 'Caches & temp', path: U + '\\AppData\\Local', children: [{ name: 'Temp', size: 12.1 }, { name: 'npm-cache', size: 6.9 }, { name: 'pip cache', size: 3.2 }] },
+    ] },
+    { name: 'Docker Desktop', cat: 'dev', type: 'Application', path: 'C:\\Program Files\\Docker', children: [
+      { name: 'WSL virtual disk', size: 54.2, path: U + '\\AppData\\Local\\Docker\\wsl\\disk\\docker_data.vhdx' },
+      { name: 'Application', size: 3.9 } ] },
+    { name: 'Adobe Creative Cloud', cat: 'creative', type: 'Application', path: 'C:\\Program Files\\Adobe', children: [
+      { name: 'Media cache', size: 34.4, path: U + '\\AppData\\Roaming\\Adobe\\Common\\Media Cache Files' },
+      { name: 'Premiere Pro', size: 9.5 }, { name: 'After Effects', size: 8.2 }, { name: 'Photoshop', size: 6.8 }, { name: 'Lightroom Classic', size: 3.1 } ] },
+    { name: 'Windows', cat: 'system', type: 'System', path: 'C:\\Windows', children: [
+      { name: 'WinSxS', size: 11.4 }, { name: 'Installer', size: 8.1 }, { name: 'Fonts, drivers & other', size: 7.6 }, { name: 'System32', size: 6.2 }, { name: 'SoftwareDistribution', size: 4.3 } ] },
+    { name: 'Page & hibernation files', cat: 'system', type: 'System', path: 'C:\\', children: [
+      { name: 'pagefile.sys', size: 24.0, path: 'C:\\pagefile.sys' }, { name: 'hiberfil.sys', size: 12.8, path: 'C:\\hiberfil.sys' } ] },
+    { name: 'Visual Studio 2022', cat: 'dev', type: 'Application', path: 'C:\\Program Files\\Microsoft Visual Studio\\2022', children: [
+      { name: 'Windows SDKs', size: 14.1, path: 'C:\\Program Files (x86)\\Windows Kits\\10' }, { name: 'IDE', size: 11.8 }, { name: '.NET SDKs', size: 8.7, path: 'C:\\Program Files\\dotnet\\sdk' }, { name: 'Android SDK', size: 6.4, path: U + '\\AppData\\Local\\Android\\Sdk' } ] },
+    { name: 'Spotify', cat: 'media', type: 'Application', path: U + '\\AppData\\Roaming\\Spotify', children: [
+      { name: 'Offline downloads', size: 10.8, path: U + '\\AppData\\Local\\Spotify\\Storage' }, { name: 'Application', size: 0.7 } ] },
+    { name: 'Microsoft Office', cat: 'productivity', type: 'Application', path: 'C:\\Program Files\\Microsoft Office', size: 5.2 },
+    { name: 'Google Chrome', cat: 'productivity', type: 'Application', path: 'C:\\Program Files\\Google\\Chrome', children: [
+      { name: 'Profile & cache', size: 2.6, path: U + '\\AppData\\Local\\Google\\Chrome\\User Data' }, { name: 'Application', size: 0.8 } ] },
+    { name: 'Minecraft', cat: 'games', type: 'Application', path: U + '\\AppData\\Roaming\\.minecraft', children: [
+      { name: 'Worlds', size: 2.1, path: U + '\\AppData\\Roaming\\.minecraft\\saves' }, { name: 'Game files', size: 1.1 } ] },
+    { name: 'Discord', cat: 'productivity', type: 'Application', path: U + '\\AppData\\Local\\Discord', size: 1.3 },
+    { name: 'Blender', cat: 'creative', type: 'Application', path: 'C:\\Program Files\\Blender Foundation', size: 1.1 },
+  ] },
+  { letter: 'D:', name: 'Games', kind: 'SATA SSD', capacity: 2000, files: 188406, secs: 6.1, children: [
+    { name: 'Steam', cat: 'games', type: 'Application', path: 'D:\\SteamLibrary\\steamapps\\common', children: [
+      { name: 'Call of Duty', size: 236 }, { name: "Baldur's Gate 3", size: 148 }, { name: 'Starfield', size: 138 }, { name: 'Red Dead Redemption 2', size: 121 },
+      { name: 'Cyberpunk 2077', size: 91 }, { name: 'Elden Ring', size: 52 }, { name: 'Counter-Strike 2', size: 36 }, { name: 'Shader cache', size: 9.4, path: 'D:\\SteamLibrary\\steamapps\\shadercache' } ] },
+    { name: 'Xbox', cat: 'games', type: 'Application', path: 'D:\\XboxGames', children: [
+      { name: 'Microsoft Flight Simulator 2024', size: 180 }, { name: 'Forza Horizon 5', size: 132 }, { name: 'Halo Infinite', size: 48 } ] },
+    { name: 'Epic Games', cat: 'games', type: 'Application', path: 'D:\\Epic Games', children: [
+      { name: 'Alan Wake 2', size: 88 }, { name: 'Fortnite', size: 31 } ] },
+    { name: 'Game captures', cat: 'media', type: 'Folder', path: 'D:\\Captures', children: [
+      { name: 'Clips', size: 46 }, { name: 'Full sessions', size: 28 } ] },
+  ] },
+  { letter: 'E:', name: 'Backup', kind: 'External HDD', capacity: 4000, files: 961233, secs: 41.8, children: [
+    { name: 'File History', cat: 'system', type: 'Folder', children: [{ name: '2026', size: 340 }, { name: '2025', size: 270 }] },
+    { name: 'Photo archive', cat: 'user', type: 'Folder', children: [{ name: 'RAW', size: 310 }, { name: 'JPEG', size: 110 }] },
+    { name: 'Virtual machines', cat: 'dev', type: 'Folder', children: [{ name: 'Ubuntu 24.04.vhdx', size: 120 }, { name: 'Windows 11 test.vhdx', size: 70 }] },
+  ] },
+];
+
+function prep(n, parent, drive) {
+  n.parent = parent; n.drive = drive;
+  if (!n.cat && parent) n.cat = parent.cat;
+  if (!n.path) n.path = parent ? parent.path.replace(/\\$/, '') + '\\' + n.name : n.letter + '\\';
+  n.app = n.type === 'Application' ? n : parent && parent.app;
+  if (n.children) {
+    n.children.forEach(c => prep(c, n, drive));
+    n.children.sort((a, b) => b.size - a.size);
+    n.size = n.children.reduce((s, c) => s + c.size, 0);
+  }
+}
+DRIVES.forEach(d => { d.label = `${d.name} (${d.letter})`; prep(d, null, d); });
+
+const fmt = gb => gb >= 1000 ? (gb / 1000).toFixed(2) + ' TB' : gb >= 100 ? gb.toFixed(0) + ' GB' : gb >= 1 ? gb.toFixed(1) + ' GB' : Math.round(gb * 1000) + ' MB';
+const pct = (a, b) => { const p = a / b * 100; return (p >= 10 ? p.toFixed(0) : p.toFixed(1)) + '%'; };
+const cc = c => `var(--c-${c || 'system'})`;
+const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+const nameOf = n => n.label || n.name;
+const trunc = (s, px, cw = 6.8) => { const k = Math.floor(px / cw); if (k < 3) return ''; return s.length <= k ? s : s.slice(0, k - 1) + '…'; };
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const state = { view: 'treemap', lastViz: 'treemap', drive: DRIVES[0], focus: DRIVES[0], selected: null };
+
+const $ = id => document.getElementById(id);
+const pickerEl = $('picker'), appEl = $('app'), vizEl = $('viz'), svgEl = $('svg'), tip = $('tip');
+
+function catTotals(node) {
+  const t = {};
+  (function walk(n) { if (n.children) n.children.forEach(walk); else t[n.cat] = (t[n.cat] || 0) + n.size; })(node);
+  return t;
+}
+function usageBar(d) {
+  const t = catTotals(d);
+  const segs = Object.keys(CATS).filter(k => t[k]).map(k =>
+    `<span style="width:${t[k] / d.capacity * 100}%;background:${cc(k)}" title="${CATS[k]}: ${fmt(t[k])}"></span>`).join('');
+  return `<div class="ubar" role="img" aria-label="${fmt(d.size)} used of ${fmt(d.capacity)}">${segs}</div>`;
+}
+const driveIcon = kind => kind.includes('External')
+  ? `<svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="9" y="4" width="22" height="32" rx="4"/><circle cx="20" cy="29" r="2"/><path d="M14 10h12"/></svg>`
+  : `<svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="4" y="11" width="32" height="18" rx="3"/><path d="M4 22h32"/><circle cx="30" cy="25.5" r="1.3" fill="currentColor"/><path d="M9 25.5h8"/></svg>`;
+
+/* ---------- Drive picker ---------- */
+function renderPicker() {
+  pickerEl.innerHTML = `
+    <h2>Choose a drive to scan</h2>
+    <p class="sub">${DRIVES.length} drives found. Scanning reads file sizes only and never changes anything.</p>
+    <div class="dcards">${DRIVES.map((d, i) => `
+      <article class="dcard">
+        <div class="dcard-head">${driveIcon(d.kind)}<div><h3>${esc(d.label)}</h3><p>${d.kind} · ${fmt(d.capacity)}</p></div></div>
+        ${usageBar(d)}
+        <p class="nums"><span><b>${fmt(d.size)}</b> used</span><span>${fmt(d.capacity - d.size)} free</span></p>
+        <button class="btn primary" data-scan="${i}">Scan ${d.letter}</button>
+        <div class="scan" hidden><div class="scan-track"><i></i></div><p class="scan-text"></p></div>
+      </article>`).join('')}
+    </div>`;
+}
+pickerEl.addEventListener('click', e => {
+  const b = e.target.closest('[data-scan]');
+  if (b) scan(DRIVES[+b.dataset.scan], b.closest('.dcard'));
+});
+function leaves(n, out = []) { if (n.children) n.children.forEach(c => leaves(c, out)); else out.push(n); return out; }
+function scan(d, card) {
+  const btn = card.querySelector('button'), box = card.querySelector('.scan');
+  const bar = box.querySelector('i'), text = box.querySelector('.scan-text');
+  btn.hidden = true; box.hidden = false;
+  const paths = leaves(d).map(l => l.path), dur = reduced ? 300 : 1600, t0 = performance.now();
+  (function step(t) {
+    const p = Math.min(1, (t - t0) / dur);
+    bar.style.width = p * 100 + '%';
+    text.textContent = `${Math.round(d.files * p).toLocaleString()} files · ${paths[Math.min(paths.length - 1, Math.floor(p * paths.length))]}`;
+    if (p < 1) requestAnimationFrame(step);
+    else { state.drive = d; state.focus = d; state.selected = null; setView(state.lastViz); }
+  })(t0);
+}
+
+/* ---------- Shared chrome ---------- */
+function renderDrives() {
+  $('drives').innerHTML = `<p class="side-h">Drives</p>` + DRIVES.map((d, i) => `
+    <button class="drive-btn" data-drive="${i}" aria-current="${d === state.drive}">
+      <span class="dn">${esc(d.name)} <span>${d.letter}</span></span>
+      ${usageBar(d)}
+      <span class="dm">${fmt(d.size)} of ${fmt(d.capacity)}</span>
+    </button>`).join('') + `<button class="btn" data-view="picker">Scan another drive</button>`;
+}
+$('drives').addEventListener('click', e => {
+  const b = e.target.closest('[data-drive]');
+  if (b) { const d = DRIVES[+b.dataset.drive]; state.drive = d; state.focus = d; state.selected = null; render(); }
+  if (e.target.closest('[data-view="picker"]')) setView('picker');
+});
+
+function chain(n) { const c = []; for (let x = n; x; x = x.parent) c.unshift(x); return c; }
+function renderToolbar() {
+  const c = chain(state.focus);
+  $('crumbs').innerHTML = c.map((n, i) => (i ? '<span class="sep">›</span>' : '') +
+    `<button data-crumb="${i}" ${n === state.focus ? 'aria-current="page"' : ''}>${esc(i === 0 ? n.letter : n.name)}</button>`).join('');
+  $('up').disabled = !state.focus.parent && !state.selected;
+  $('total').textContent = fmt(state.focus.size);
+}
+$('crumbs').addEventListener('click', e => {
+  const b = e.target.closest('[data-crumb]');
+  if (!b) return;
+  state.focus = chain(state.focus)[+b.dataset.crumb]; state.selected = null; render();
+});
+function goUp() {
+  if (state.selected) state.selected = null;
+  else if (state.focus.parent) { state.selected = state.focus; state.focus = state.focus.parent; }
+  render();
+}
+$('up').addEventListener('click', goUp);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && state.view !== 'picker') goUp(); });
+
+function renderUsage() {
+  const d = state.drive, t = catTotals(d);
+  $('usage').innerHTML = usageBar(d) + `<div class="legend">` +
+    Object.keys(CATS).filter(k => t[k]).map(k => `<span><i style="background:${cc(k)}"></i>${CATS[k]} <b>${fmt(t[k])}</b></span>`).join('') +
+    `<span class="free"><i></i>Free <b>${fmt(d.capacity - d.size)}</b></span></div>`;
+}
+
+function renderStatus() {
+  const d = state.drive;
+  $('where').textContent = state.view === 'picker' ? '' : state.focus.path;
+  $('status').innerHTML = state.view === 'picker'
+    ? `<span>Ready</span><span class="pill-example">example data</span>`
+    : `<span>${d.letter} ${d.files.toLocaleString()} files scanned in ${d.secs} s · ${fmt(d.size)} used of ${fmt(d.capacity)}</span><span class="pill-example">example data</span>`;
+}
+
+/* ---------- Detail panel ---------- */
+function kindOf(n) {
+  if (!n.parent) return 'Drive';
+  if (n.type) return n.type;
+  if (n.app) return `Part of ${n.app.name}`;
+  return n.children ? 'Folder' : 'Folder or file';
+}
+function renderDetail() {
+  const n = state.selected || state.focus, d = state.drive;
+  const isDrive = !n.parent;
+  const actions = isDrive ? '' : n.cat === 'system'
+    ? `<p class="note-sys">Managed by Windows. Use Disk Cleanup or Storage Sense to shrink it.</p><div class="actions"><button class="btn" data-act>Show in Explorer</button></div>`
+    : `<div class="actions"><button class="btn" data-act>Show in Explorer</button>${n.type === 'Application'
+        ? '<button class="btn" data-act>Uninstall…</button>' : '<button class="btn" data-act>Move to Recycle Bin…</button>'}</div>`;
+  const kids = n.children ? n.children.slice(0, 7) : [];
+  $('detail').innerHTML = `
+    <div style="display:grid;gap:8px">
+      <h2>${esc(nameOf(n))}</h2>
+      <div class="kind">${n.cat ? `<span class="chip"><i style="background:${cc(n.cat)}"></i>${CATS[n.cat]}</span>` : ''}<span>${esc(kindOf(n))}</span></div>
+    </div>
+    <div class="big">${fmt(n.size)}</div>
+    <div class="share">
+      ${isDrive
+        ? `<div class="meter"><i style="width:${n.size / n.capacity * 100}%;background:var(--ink)"></i></div><span>${pct(n.size, n.capacity)} of ${fmt(n.capacity)} used · ${fmt(n.capacity - n.size)} free</span>`
+        : `<div class="meter"><i style="width:${Math.max(.6, n.size / d.capacity * 100)}%;background:${cc(n.cat)}"></i></div><span>${pct(n.size, d.capacity)} of ${d.letter} capacity${n.parent.parent ? ` · ${pct(n.size, n.parent.size)} of ${esc(n.parent.name)}` : ''}</span>`}
+    </div>
+    <p class="path">${esc(n.path)}</p>
+    ${actions}
+    ${kids.length ? `<div class="inside"><h3>Largest inside</h3><ol>${kids.map((c, i) => `
+      <li><button class="row" data-kid="${i}"><span class="nm">${esc(c.name)}</span><span class="sz">${fmt(c.size)}</span>
+      <span class="meter"><i style="width:${c.size / kids[0].size * 100}%;background:${cc(c.cat)}"></i></span></button></li>`).join('')}</ol></div>` : ''}`;
+}
+$('detail').addEventListener('click', e => {
+  const n = state.selected || state.focus;
+  const r = e.target.closest('[data-kid]');
+  if (r) { if (state.selected) { state.focus = state.selected; state.selected = null; } onNode(n.children[+r.dataset.kid]); return; }
+  if (e.target.closest('[data-act]')) toast('Mockup only. Nothing on disk is touched.');
+});
+let toastT;
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 2200); }
+
+/* ---------- Visualizations ---------- */
+function onNode(n) {
+  if (n.children) { state.focus = n; state.selected = null; }
+  else state.selected = state.selected === n ? null : n;
+  tip.hidden = true;
+  render();
+}
+const hier = n => d3.hierarchy(n, x => x.children).sum(x => x.children ? 0 : x.size).sort((a, b) => b.value - a.value);
+const isSel = d => d.data === state.selected;
+function bind(sel, d) {
+  sel.on('click', () => onNode(d.data))
+    .on('mouseenter', e => showTip(e, d.data))
+    .on('mousemove', moveTip)
+    .on('mouseleave', () => tip.hidden = true);
+}
+function showTip(e, n) {
+  tip.innerHTML = `<b>${esc(n.name)}</b><span>${fmt(n.size)} · ${pct(n.size, state.focus.size)} of ${esc(state.focus.parent ? state.focus.name : state.focus.letter)}</span>${n.children ? '<em>Click to open</em>' : ''}`;
+  tip.hidden = false; moveTip(e);
+}
+function moveTip(e) {
+  const r = vizEl.getBoundingClientRect();
+  let x = e.clientX - r.left + 14, y = e.clientY - r.top + 14;
+  if (x + tip.offsetWidth > r.width) x = e.clientX - r.left - tip.offsetWidth - 14;
+  if (y + tip.offsetHeight > r.height) y = e.clientY - r.top - tip.offsetHeight - 14;
+  tip.style.transform = `translate(${Math.max(0, x)}px,${Math.max(0, y)}px)`;
+}
+function label(sel, x, y, name, size, maxW, cls = '') {
+  const cw = cls.includes('sm') ? 6.3 : 7.2, nm = trunc(name, maxW, cw);
+  if (!nm) return;
+  const t = sel.append('text').attr('class', 'lbl ' + cls).attr('x', x).attr('y', y);
+  t.append('tspan').text(nm);
+  if (size) t.append('tspan').attr('class', 'sz').attr('x', x).attr('dy', cls.includes('sm') ? 13 : 15).text(size);
+  return t;
+}
+
+function drawTreemap(svg, W, H) {
+  const HEAD = 24, root = hier(state.focus);
+  d3.treemap().size([W, H]).tile(d3.treemapSquarify.ratio(1.3)).round(true)
+    .paddingInner(d => d.depth === 0 ? 4 : 2)
+    .paddingTop(d => d.depth === 1 ? HEAD : 0)
+    .paddingRight(d => d.depth === 1 ? 3 : 0)
+    .paddingBottom(d => d.depth === 1 ? 3 : 0)
+    .paddingLeft(d => d.depth === 1 ? 3 : 0)(root);
+  for (const d of root.children || []) {
+    const w = d.x1 - d.x0, h = d.y1 - d.y0;
+    if (w < 1 || h < 1) continue;
+    const g = svg.append('g');
+    g.append('rect').attr('class', 'cell' + (isSel(d) ? ' sel' : '')).attr('x', d.x0).attr('y', d.y0).attr('width', w).attr('height', h)
+      .attr('rx', 4).style('fill', cc(d.data.cat)).call(bind, d);
+    if (d.children && h > HEAD + 6) {
+      g.append('rect').attr('class', 'shade').attr('x', d.x0).attr('y', d.y0).attr('width', w).attr('height', h).attr('rx', 4);
+      for (const c of d.children) {
+        const cw = c.x1 - c.x0, ch = c.y1 - c.y0;
+        if (cw < 1 || ch < 1) continue;
+        g.append('rect').attr('class', 'cell' + (isSel(c) ? ' sel' : '')).attr('x', c.x0).attr('y', c.y0).attr('width', cw).attr('height', ch)
+          .attr('rx', 2).style('fill', cc(c.data.cat)).call(bind, c);
+        if (cw > 56 && ch > 36) label(g, c.x0 + 6, c.y0 + 15, c.data.name, fmt(c.value), cw - 12, 'sm');
+        else if (cw > 56 && ch > 18) label(g, c.x0 + 6, c.y0 + 13, c.data.name, '', cw - 12, 'sm');
+      }
+      const sz = fmt(d.value), szW = sz.length * 6.8 + 10;
+      const t = label(g, d.x0 + 8, d.y0 + 16, d.data.name, '', w > 150 ? w - szW - 20 : w - 16);
+      if (t && w > 150) g.append('text').attr('class', 'lbl').attr('x', d.x1 - 8).attr('y', d.y0 + 16).attr('text-anchor', 'end')
+        .append('tspan').attr('class', 'sz').text(sz);
+    } else if (w > 46 && h > 36) label(g, d.x0 + 8, d.y0 + 18, d.data.name, fmt(d.value), w - 16);
+  }
+}
+
+function drawSunburst(svg, W, H) {
+  const root = hier(state.focus), levels = Math.max(1, Math.min(3, root.height));
+  const R = Math.min(W, H) / 2 - 6, r0 = Math.max(52, R * 0.3), ring = (R - r0) / levels;
+  d3.partition().size([2 * Math.PI, root.height + 1])(root);
+  const inner = d => r0 + (d.depth - 1) * ring, outer = d => r0 + d.depth * ring;
+  const arc = d3.arc().startAngle(d => d.x0).endAngle(d => d.x1)
+    .padAngle(d => Math.min((d.x1 - d.x0) / 2, .006)).padRadius(R)
+    .innerRadius(d => inner(d) + 1).outerRadius(d => outer(d) - 1).cornerRadius(2);
+  const g = svg.append('g').attr('transform', `translate(${W / 2},${H / 2})`);
+  const nodes = root.descendants().filter(d => d.depth > 0 && d.depth <= levels && d.x1 - d.x0 > .003);
+  g.selectAll('path').data(nodes).join('path').attr('class', d => 'cell' + (isSel(d) ? ' sel' : ''))
+    .attr('d', arc).style('fill', d => cc(d.data.cat)).style('fill-opacity', d => [1, 1, .74, .52][d.depth])
+    .each(function (d) { d3.select(this).call(bind, d); });
+  for (const d of nodes) {
+    const mid = (inner(d) + outer(d)) / 2, arcLen = (d.x1 - d.x0) * mid;
+    if (arcLen < 15) continue;
+    const a = (d.x0 + d.x1) / 2 * 180 / Math.PI;
+    const nm = trunc(d.data.name, ring - 12, 6.3);
+    if (!nm) continue;
+    g.append('text').attr('class', 'lbl sm halo').attr('dy', '0.35em').attr('text-anchor', 'middle')
+      .attr('transform', `rotate(${a - 90}) translate(${mid},0) rotate(${a < 180 ? 0 : 180})`).text(nm);
+  }
+  const up = !!state.focus.parent;
+  g.append('circle').attr('r', r0 - 4).attr('class', 'hub' + (up ? ' clickable' : '')).on('click', () => up && goUp());
+  g.append('text').attr('class', 'hub-t').attr('text-anchor', 'middle').attr('y', up ? -8 : -2).text(trunc(state.focus.parent ? state.focus.name : state.focus.letter, (r0 - 8) * 2, 7.4));
+  g.append('text').attr('class', 'hub-s').attr('text-anchor', 'middle').attr('y', up ? 10 : 16).text(fmt(state.focus.size));
+  if (up) g.append('text').attr('class', 'hub-up').attr('text-anchor', 'middle').attr('y', 28).text('↑ click to go up');
+}
+
+function drawBubbles(svg, W, H) {
+  const root = hier(state.focus);
+  d3.pack().size([W, H]).padding(d => d.depth === 0 ? 8 : 3)(root);
+  for (const d of root.children || []) {
+    const g = svg.append('g');
+    g.append('circle').attr('class', 'cell' + (isSel(d) ? ' sel' : '')).attr('cx', d.x).attr('cy', d.y).attr('r', d.r)
+      .style('fill', cc(d.data.cat)).style('fill-opacity', d.children ? .28 : 1)
+      .style('stroke', isSel(d) ? null : cc(d.data.cat)).call(bind, d);
+    const labelParent = d.children && d.r > 44;
+    for (const c of d.children || []) {
+      g.append('circle').attr('class', 'cell' + (isSel(c) ? ' sel' : '')).attr('cx', c.x).attr('cy', c.y).attr('r', c.r)
+        .style('fill', cc(c.data.cat)).call(bind, c);
+      const coversCenter = Math.hypot(c.x - d.x, c.y - d.y) < c.r + 14;
+      if (c.r > 30 && !(labelParent && coversCenter)) {
+        const t = label(g, c.x, c.y - 2, c.data.name, fmt(c.value), c.r * 1.7, 'sm');
+        t && t.attr('text-anchor', 'middle');
+      }
+    }
+    if (labelParent || (!d.children && d.r > 28)) {
+      const t = label(g, d.x, d.y - 3, d.data.name, fmt(d.value), d.r * 1.8, labelParent ? 'halo' : '');
+      t && t.attr('text-anchor', 'middle');
+    }
+  }
+}
+
+function renderViz() {
+  const W = vizEl.clientWidth, H = vizEl.clientHeight;
+  if (W < 20 || H < 20 || state.view === 'picker') return;
+  const svg = d3.select(svgEl);
+  svg.selectAll('*').remove();
+  svg.attr('viewBox', `0 0 ${W} ${H}`);
+  ({ treemap: drawTreemap, sunburst: drawSunburst, bubbles: drawBubbles })[state.view](svg, W, H);
+}
+let raf;
+new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(renderViz); }).observe(vizEl);
+
+/* ---------- Concept notes ---------- */
+const NOTES = {
+  picker: { h: '1 · Drive picker', p: 'The app opens on the drives it finds, each with a quick used/free bar that needs no scan. Pick one and it scans. In the real app, results stream in while scanning so the biggest items show up within seconds.',
+    pro: ['One obvious first step', 'Instant overview of every drive'], con: ['An extra click before the good part', 'Could be skipped by opening C: straight away'] },
+  treemap: { h: '2A · Treemap', p: 'Each rectangle\u2019s area is proportional to its size on disk. Large blocks are applications and top-level folders; the tiles inside are what they are made of. Click a block to zoom in; use the breadcrumb, Up, or Esc to go back.',
+    pro: ['Uses every pixel, so area maps cleanly to bytes', 'Biggest items jump out immediately', 'Shows two levels at once'], con: ['Long names get cut off in small tiles', 'Nesting is less obvious than in B'] },
+  sunburst: { h: '2B · Sunburst', p: 'Rings show three levels at once: apps and folders on the inner ring, their contents further out. Here angle, rather than area, stands for size. Click a segment to make it the center; click the center to go back up.',
+    pro: ['Three levels of nesting in one picture', 'Distinctive, easy to explain'], con: ['Comparing slices on different rings is hard', 'Small items become thin slivers'] },
+  bubbles: { h: '2C · Bubbles', p: 'Each circle\u2019s area is proportional to its size, with an app\u2019s parts packed inside it. Softer and more playful than the treemap, and groups read clearly.',
+    pro: ['Friendly look', 'Groups are very clear'], con: ['About a quarter of the space is gaps between circles', 'Small items end up tiny and unlabeled'] },
+};
+function renderNotes() {
+  const n = NOTES[state.view];
+  $('concept').innerHTML = `<h2>${n.h}</h2><p>${n.p}</p><div class="pc">
+    <div><h3>Strengths</h3><ul>${n.pro.map(x => `<li>${x}</li>`).join('')}</ul></div>
+    <div><h3>Weaknesses</h3><ul>${n.con.map(x => `<li>${x}</li>`).join('')}</ul></div></div>`;
+}
+
+/* ---------- Top level ---------- */
+function render() {
+  document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', t.dataset.view === state.view));
+  const picker = state.view === 'picker';
+  pickerEl.hidden = !picker; appEl.hidden = picker;
+  if (picker) renderPicker();
+  else { renderDrives(); renderToolbar(); renderUsage(); renderDetail(); renderViz(); }
+  renderStatus(); renderNotes();
+}
+function setView(v) {
+  state.view = v;
+  if (v !== 'picker') state.lastViz = v;
+  try { history.replaceState(null, '', '#' + v); } catch (e) {}
+  render();
+}
+document.querySelector('.tabs').addEventListener('click', e => { const t = e.target.closest('.tab'); if (t) setView(t.dataset.view); });
+
+const initial = (location.hash || '').slice(1);
+setView(NOTES[initial] ? initial : 'picker');
+</script>
