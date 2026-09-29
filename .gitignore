@@ -22,3 +22,6 @@ target/
 
 # Logs
 *.log
+dist-ssr/
+*.local
+devdata/

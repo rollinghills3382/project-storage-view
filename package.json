@@ -1,0 +1,24 @@
+{
+  "name": "storage-view",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "cd src-tauri && cargo test"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "d3-hierarchy": "^3.1.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/d3-hierarchy": "^3.1.7",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16"
+  }
+}
