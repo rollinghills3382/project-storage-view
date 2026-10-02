@@ -146,12 +146,24 @@ fn cancel_scan(state: State<AppState>) {
     }
 }
 
-/// One node of a scanned drive with two levels of children, which is what the treemap draws.
+fn lookup(state: &State<AppState>, drive: &str, id: &str) -> Result<(Arc<View>, Id), String> {
+    let view = state.views.lock().unwrap().get(drive).cloned().ok_or_else(|| format!("{drive} has not been scanned yet."))?;
+    let id = Id::parse(id).filter(|&i| view.contains(i)).ok_or_else(|| format!("Unknown item {id}."))?;
+    Ok((view, id))
+}
+
+/// One node of a scanned drive and its children, which is what a row in the list expands to.
 #[tauri::command]
 fn get_node(state: State<AppState>, drive: String, id: String) -> Result<ViewNode, String> {
-    let view = state.views.lock().unwrap().get(&drive).cloned().ok_or_else(|| format!("{drive} has not been scanned yet."))?;
-    let id = Id::parse(&id).filter(|&i| view.contains(i)).ok_or_else(|| format!("Unknown item {id}."))?;
-    Ok(view.view(id, 2))
+    let (view, id) = lookup(&state, &drive, &id)?;
+    Ok(view.view(id, 1))
+}
+
+/// One node of a scanned drive with the nested levels the treemap draws.
+#[tauri::command]
+fn get_map(state: State<AppState>, drive: String, id: String) -> Result<ViewNode, String> {
+    let (view, id) = lookup(&state, &drive, &id)?;
+    Ok(view.map(id))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -159,7 +171,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![app_status, restart_as_admin, list_drives, start_scan, cancel_scan, get_node])
+        .invoke_handler(tauri::generate_handler![app_status, restart_as_admin, list_drives, start_scan, cancel_scan, get_node, get_map])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

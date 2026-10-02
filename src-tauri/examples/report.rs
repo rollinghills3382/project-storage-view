@@ -1,7 +1,7 @@
 //! Prints the app-grouped breakdown of a folder or drive, for checking the grouping rules
 //! without the UI: `cargo run --release --example report -- C:\`
 //!
-//! `--json <file>` also writes the drive root and its largest children in the shape the UI
+//! `--json <file>` also writes the drive root and its largest folders in the shape the UI
 //! requests them, so the browser preview (`npm run dev`) can replay a real scan.
 use std::path::PathBuf;
 use std::time::Instant;
@@ -38,24 +38,37 @@ fn main() {
     }
 
     if let Some(out) = json_out {
-        write_json(&view, &root, started.elapsed().as_millis() as u64, progress.denied.load(std::sync::atomic::Ordering::Relaxed), &out);
+        let count = |n: &std::sync::atomic::AtomicU64| n.load(std::sync::atomic::Ordering::Relaxed);
+        write_json(&view, &root, started.elapsed().as_millis() as u64, count(&progress.dirs), count(&progress.denied), &out);
     }
 }
 
-fn write_json(view: &View, root: &std::path::Path, elapsed_ms: u64, denied: u64, out: &str) {
+fn write_json(view: &View, root: &std::path::Path, elapsed_ms: u64, dirs: u64, denied: u64, out: &str) {
+    // `maps` is what `get_map` returns for an id and `nodes` what `get_node` returns.
+    let mut maps = serde_json::Map::new();
     let mut nodes = serde_json::Map::new();
     let mut add = |id: Id| {
-        let v = view.view(id, 2);
-        nodes.insert(v.id.clone(), serde_json::to_value(&v).unwrap());
+        let v = view.view(id, 1);
+        if v.has_children {
+            maps.insert(v.id.clone(), serde_json::to_value(view.map(id)).unwrap());
+            nodes.insert(v.id.clone(), serde_json::to_value(&v).unwrap());
+        }
     };
     add(Id::Root);
-    for child in view.children(Id::Root).into_iter().take(15) {
+    // Enough to zoom in twice: every top-level block, and the largest folders inside the big ones.
+    for (i, child) in view.children(Id::Root).into_iter().enumerate() {
         add(child);
+        if i < 12 {
+            for grandchild in view.children(child).into_iter().take(8) {
+                add(grandchild);
+            }
+        }
     }
     let drive = drives::list().into_iter().find(|d| d.mount.eq_ignore_ascii_case(&root.display().to_string()));
     let doc = serde_json::json!({
         "drive": drive,
-        "summary": { "drive": root.display().to_string(), "files": view.tree.file_count(), "dirs": 0, "denied": denied, "elapsed_ms": elapsed_ms },
+        "summary": { "drive": root.display().to_string(), "files": view.tree.file_count(), "dirs": dirs, "denied": denied, "elapsed_ms": elapsed_ms },
+        "maps": maps,
         "nodes": nodes,
     });
     std::fs::write(out, serde_json::to_string(&doc).unwrap()).unwrap();
