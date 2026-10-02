@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { canOpen, drawTreemap } from "./treemap";
+import { canOpen, createTreemap } from "./treemap";
 import {
   CATEGORIES,
   catColor,
@@ -10,6 +10,7 @@ import {
   fmtBytes,
   fmtCount,
   h,
+  kindLabel,
   pct,
   type Category,
   type Drive,
@@ -20,33 +21,51 @@ import {
 
 interface DriveScan {
   summary: ScanSummary;
-  cache: Map<string, ViewNode>;
+  /** `get_map` results: a node with the nested levels the treemap draws. */
+  maps: Map<string, ViewNode>;
+  /** `get_node` results: a node with its children, which is what a list row expands to. */
+  nodes: Map<string, ViewNode>;
 }
 
+/** An item and the folders it sits inside, from the drive root down to its parent. */
+interface Located {
+  node: ViewNode;
+  chain: ViewNode[];
+}
+
+type SortKey = "name" | "size";
+
 const state = {
-  screen: "picker" as "picker" | "map",
   drives: [] as Drive[],
   scans: new Map<string, DriveScan>(),
   drive: null as Drive | null,
-  /** Breadcrumb from the drive root to the node being viewed. */
+  tab: "map" as "map" | "list",
+  /** Map location: breadcrumb from the drive root to the folder being viewed. Empty until the drive is scanned. */
   trail: [] as ViewNode[],
-  selected: null as ViewNode | null,
+  selected: null as Located | null,
+  /** Ids of the expanded list rows. */
+  open: new Set<string>(),
+  sort: { key: "size" as SortKey, dir: -1 },
   scanning: null as { drive: string; progress: ScanProgress | null } | null,
   elevated: false,
-  error: "",
+  message: "",
 };
 
 const app = document.getElementById("app")!;
+const scanOf = (d: Drive | null) => (d ? state.scans.get(d.mount) : undefined);
 const focus = () => state.trail[state.trail.length - 1];
+/** True when the selected drive has scan results on screen. */
+const showing = () => state.trail.length > 0;
 
 /* ---------- Data ---------- */
 
-async function loadNode(drive: string, id: string): Promise<ViewNode> {
-  const scan = state.scans.get(drive)!;
-  const cached = scan.cache.get(id);
+async function load(kind: "maps" | "nodes", id: string): Promise<ViewNode> {
+  const drive = state.drive!.mount;
+  const cache = state.scans.get(drive)![kind];
+  const cached = cache.get(id);
   if (cached) return cached;
-  const node = await invoke<ViewNode>("get_node", { drive, id });
-  scan.cache.set(id, node);
+  const node = await invoke<ViewNode>(kind === "maps" ? "get_map" : "get_node", { drive, id });
+  cache.set(id, node);
   return node;
 }
 
@@ -55,17 +74,33 @@ async function refreshDrives() {
   if (state.drive) state.drive = state.drives.find((d) => d.mount === state.drive!.mount) ?? state.drive;
 }
 
+let messageTimer = 0;
+/** Shows a problem in the status bar for a few seconds. */
+function notify(message: string) {
+  state.message = message;
+  clearTimeout(messageTimer);
+  messageTimer = window.setTimeout(() => ((state.message = ""), render()), 8000);
+  render();
+}
+
+/** Runs a UI action and reports anything it throws. */
+async function run(action: () => Promise<void> | void) {
+  try {
+    await action();
+  } catch (e) {
+    notify(String(e));
+  }
+}
+
 async function startScan(drive: Drive) {
-  state.error = "";
-  state.screen = "picker";
+  state.message = "";
   state.scanning = { drive: drive.mount, progress: null };
   render();
   try {
     await invoke("start_scan", { drive: drive.mount });
   } catch (e) {
     state.scanning = null;
-    state.error = String(e);
-    render();
+    notify(String(e));
   }
 }
 
@@ -74,146 +109,417 @@ async function restartAsAdmin(drive: Drive | null) {
   try {
     await invoke("restart_as_admin", { scan: drive?.mount ?? null });
   } catch (e) {
-    toast(e === "cancelled" ? "Administrator access wasn't granted. Storage View keeps running as before." : String(e));
+    notify(e === "cancelled" ? "Administrator access wasn't granted. Storage View keeps running as before." : String(e));
   }
-}
-
-function adminButton(drive: Drive | null) {
-  return h("button", { class: "btn admin", title: "Opens a Windows prompt asking for administrator access", onclick: () => restartAsAdmin(drive) }, h("span", { class: "shield", "aria-hidden": "true" }), "Restart as administrator");
-}
-
-async function showDrive(drive: Drive) {
-  state.drive = drive;
-  state.trail = [await loadNode(drive.mount, "root")];
-  state.selected = null;
-  state.screen = "map";
-  render();
-}
-
-async function open(node: ViewNode, parent: ViewNode | null) {
-  const drive = state.drive!.mount;
-  hideTip();
-  // Keep the name the user clicked on; app locations are labelled by path in their parent.
-  const load = async (n: ViewNode) => ({ ...(await loadNode(drive, n.id)), name: n.name });
-  if (parent) state.trail.push(await load(parent));
-  state.trail.push(await load(node));
-  state.selected = null;
-  render();
-}
-
-function select(node: ViewNode) {
-  state.selected = state.selected?.id === node.id ? null : node;
-  render();
-}
-
-function goUp() {
-  if (state.selected) state.selected = null;
-  else if (state.trail.length > 1) state.selected = state.trail.pop()!;
-  render();
-}
-
-/* ---------- Shared pieces ---------- */
-
-function categoryTotals(root: ViewNode): Map<Category, number> {
-  const totals = new Map<Category, number>();
-  for (const c of root.children ?? []) {
-    const cat = c.category ?? "other";
-    totals.set(cat, (totals.get(cat) ?? 0) + c.size);
-  }
-  return totals;
-}
-
-function usageBar(drive: Drive, root: ViewNode | null) {
-  const bar = h("div", { class: "ubar", role: "img", "aria-label": `${fmtBytes(drive.total - drive.free)} used of ${fmtBytes(drive.total)}` });
-  const seg = (bytes: number, color: string, title: string, cls = "") => {
-    if (bytes <= 0) return;
-    bar.append(h("span", { class: cls, title, style: `width:${(bytes / drive.total) * 100}%;background:${color}` }));
-  };
-  if (!root) {
-    seg(drive.total - drive.free, "var(--ink)", `Used: ${fmtBytes(drive.total - drive.free)}`);
-    return bar;
-  }
-  for (const [cat, bytes] of categoryTotals(root)) seg(bytes, catColor(cat), `${CATEGORIES[cat]}: ${fmtBytes(bytes)}`);
-  const unaccounted = drive.total - drive.free - root.size;
-  seg(unaccounted, "", `Not readable or reserved by Windows: ${fmtBytes(unaccounted)}`, "unread");
-  return bar;
-}
-
-let toastTimer = 0;
-function toast(message: string) {
-  let t = document.getElementById("toast");
-  if (!t) document.body.append((t = h("div", { id: "toast", class: "toast", role: "status" })));
-  t.textContent = message;
-  t.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => (t!.hidden = true), 3000);
 }
 
 async function reveal(path: string) {
   try {
     await revealItemInDir(path);
   } catch (e) {
-    toast(`Couldn't open File Explorer: ${e}`);
+    notify(`Couldn't open File Explorer: ${e}`);
   }
 }
 
-/* ---------- Drive picker ---------- */
+/* ---------- Navigation ---------- */
 
-function driveIcon(d: Drive) {
-  const icon = h("span", { class: "drive-icon", "aria-hidden": "true" });
-  icon.innerHTML = d.removable
-    ? `<svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="9" y="4" width="22" height="32" rx="4"/><circle cx="20" cy="29" r="2"/><path d="M14 10h12"/></svg>`
-    : `<svg viewBox="0 0 40 40" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="11" width="32" height="18" rx="3"/><path d="M4 22h32"/><circle cx="30" cy="25.5" r="1.3" fill="currentColor"/><path d="M9 25.5h8"/></svg>`;
-  return icon;
+async function showDrive(drive: Drive) {
+  state.drive = drive;
+  state.trail = [];
+  state.selected = null;
+  state.open = new Set(["root"]);
+  hideTip();
+  if (scanOf(drive)) {
+    const [map] = await Promise.all([load("maps", "root"), load("nodes", "root")]);
+    if (state.drive.mount === drive.mount) state.trail = [map];
+  }
+  render();
 }
 
-function renderPicker() {
-  const busy = state.scanning;
+/** Points the map at the last folder in `trail`, which is the only one that needs its nested levels. */
+async function goTo(trail: ViewNode[], selected: Located | null) {
+  const last = trail[trail.length - 1];
+  // Keep the name the user clicked on; app locations are labelled by path in their parent.
+  const loaded = { ...(await load("maps", last.id)), name: last.name };
+  state.trail = [...trail.slice(0, -1), loaded];
+  state.selected = selected;
+  hideTip();
+  render();
+}
+
+function openTile(node: ViewNode, chain: ViewNode[]) {
+  const inside = [...state.trail, ...chain];
+  if (canOpen(node)) return goTo([...inside, node], null);
+  // A file can't be opened, so zoom into the folder that holds it.
+  if (chain.length) return goTo(inside, { node, chain: inside });
+}
+
+function select(node: ViewNode, chain: ViewNode[]) {
+  state.selected = { node, chain };
+  render();
+}
+
+function goUp() {
+  if (state.tab === "map") {
+    if (state.trail.length < 2) return;
+    const trail = state.trail.slice(0, -1);
+    return goTo(trail, { node: focus(), chain: trail });
+  }
+  const chain = state.selected?.chain;
+  if (!chain?.length) return;
+  revealRow = true;
+  select(chain[chain.length - 1], chain.slice(0, -1));
+}
+
+const canGoUp = () => showing() && (state.tab === "map" ? state.trail.length > 1 : !!state.selected?.chain.length);
+
+/** Switches tabs and carries the selection across. */
+async function setTab(tab: "map" | "list") {
+  const sel = state.selected;
+  state.tab = tab;
+  if (sel && showing()) {
+    if (tab === "list") {
+      for (const n of sel.chain) {
+        await load("nodes", n.id);
+        state.open.add(n.id);
+      }
+      revealRow = true;
+    } else if (!sel.chain.length) {
+      state.selected = null;
+    } else if (!sel.chain.some((n) => n.id === focus().id)) {
+      // The selection is outside the folder the map shows, so show the folder that holds it.
+      return goTo(sel.chain, sel);
+    }
+  }
+  render();
+  // So the arrow keys work in the list straight away.
+  if (tab === "list" && showing()) list.focus();
+}
+
+/* ---------- Toolbar and navigation row ---------- */
+
+function button(label: string, onclick: () => void, disabled = false, title?: string) {
+  return h("button", { class: "btn", onclick, disabled, title }, label);
+}
+
+function renderToolbar() {
+  const cur = state.drive;
+  const busy = !!state.scanning;
   return h(
     "div",
-    { class: "picker" },
-    h("h1", {}, "Choose a drive to scan"),
-    h("p", { class: "sub" }, "Storage View only reads file sizes. It never changes or deletes anything."),
+    { class: "toolbar" },
+    ...state.drives.map((d) =>
+      h(
+        "button",
+        { class: "drive", "aria-pressed": String(d.mount === cur?.mount), title: `${d.kind} · ${d.file_system}`, onclick: () => run(() => showDrive(d)) },
+        h("span", { class: "dl" }, h("b", {}, driveLetter(d.mount)), ` ${d.label || (d.removable ? "USB Drive" : "Local Disk")} · ${d.kind}`),
+        h("span", { class: "meter" }, h("i", { style: `width:${((d.total - d.free) / d.total) * 100}%` })),
+        h("span", { class: "dm" }, `${fmtBytes(d.free)} free of ${fmtBytes(d.total)}${scanOf(d) ? "" : " · not scanned"}`),
+      ),
+    ),
+    h("span", { class: "tsep" }),
+    cur && button(`${scanOf(cur) ? "Rescan" : "Scan"} ${driveLetter(cur.mount)}`, () => startScan(cur), busy),
+    button("Stop", () => invoke("cancel_scan"), !busy),
+    h("span", { class: "grow" }),
     !state.elevated &&
       h(
-        "div",
-        { class: "admin-note" },
-        h("p", {}, "Some system folders can only be read with administrator rights. Without them, their space shows as “Not readable”."),
-        adminButton(null),
+        "button",
+        { class: "btn", title: "Reads folders that need administrator rights. Windows will ask for permission.", onclick: () => restartAsAdmin(scanOf(cur) ? cur : null) },
+        h("span", { class: "shield", "aria-hidden": "true" }),
+        "Restart as administrator",
       ),
-    state.error && h("p", { class: "error", role: "alert" }, state.error),
+  );
+}
+
+function renderNav() {
+  const tab = (id: "map" | "list", label: string) => h("button", { role: "tab", "aria-selected": String(state.tab === id), onclick: () => run(() => setTab(id)) }, label);
+  const row = h(
+    "div",
+    { class: "nav" },
+    h("div", { class: "tabs", role: "tablist" }, tab("map", "Map"), tab("list", "List")),
+    button("Up", () => run(goUp), !canGoUp(), "Up one level (Backspace)"),
+  );
+  if (state.tab === "map" && showing()) {
+    const crumbs = h("nav", { class: "crumbs", "aria-label": "Location" });
+    state.trail.forEach((n, i) => {
+      if (i) crumbs.append(h("span", { class: "sep", "aria-hidden": "true" }, "›"));
+      const current = i === state.trail.length - 1;
+      const trail = state.trail.slice(0, i + 1);
+      crumbs.append(
+        h(
+          "button",
+          { "aria-current": current ? "page" : null, onclick: () => !current && run(() => goTo(trail, { node: state.trail[i + 1], chain: trail })) },
+          i === 0 ? driveLetter(n.name) : n.name,
+        ),
+      );
+    });
+    row.append(crumbs, h("span", { class: "total" }, fmtBytes(focus().size)));
+  } else if (state.tab === "list") {
+    row.append(button("Collapse all", () => ((state.open = new Set(["root"])), render()), !showing()));
+  }
+  const path = showing() ? state.selected?.node.path : null;
+  row.append(h("span", { class: "grow" }), button("Show in File Explorer", () => path && reveal(path), !path));
+  return row;
+}
+
+/* ---------- Map ---------- */
+
+const tip = h("div", { class: "tip", hidden: true });
+let tipNode: ViewNode | null = null;
+function hideTip() {
+  tip.hidden = true;
+  tipNode = null;
+}
+function showTip(node: ViewNode | null, e?: MouseEvent) {
+  if (!node || !e) return hideTip();
+  if (tipNode !== node) {
+    tipNode = node;
+    tip.replaceChildren(
+      h("b", {}, node.name),
+      h("span", {}, `${fmtBytes(node.size)} · ${pct(node.size, focus().size)} of ${state.trail.length > 1 ? focus().name : driveLetter(focus().name)}`),
+      h("span", { class: "dim" }, node.path),
+      h("span", { class: "dim" }, canOpen(node) && "Double-click to zoom in"),
+    );
+  }
+  tip.hidden = false;
+  const r = mapView.getBoundingClientRect();
+  let x = e.clientX - r.left + 14;
+  let y = e.clientY - r.top + 16;
+  if (x + tip.offsetWidth > r.width) x = e.clientX - r.left - tip.offsetWidth - 10;
+  if (y + tip.offsetHeight > r.height) y = e.clientY - r.top - tip.offsetHeight - 10;
+  tip.style.transform = `translate(${Math.max(0, x)}px, ${Math.max(0, y)}px)`;
+}
+
+const map = createTreemap({
+  open: (node, chain) => run(() => openTile(node, chain)),
+  select: (node, chain) => select(node, [...state.trail, ...chain]),
+  hover: showTip,
+});
+const mapView = h("div", { class: "view" }, map.el, tip);
+let frame = 0;
+new ResizeObserver(() => {
+  cancelAnimationFrame(frame);
+  frame = requestAnimationFrame(drawMap);
+}).observe(map.el);
+
+function drawMap() {
+  if (state.tab !== "map" || !showing() || !map.el.isConnected) return;
+  const sel = state.selected;
+  map.draw(focus(), new Set(sel ? [...sel.chain, sel.node].map((n) => n.id) : []));
+}
+
+/* ---------- List ---------- */
+
+const COLUMNS: { id: string; label: string; sort?: SortKey; width?: string; num?: boolean }[] = [
+  { id: "name", label: "Name", sort: "name" },
+  { id: "size", label: "Size", sort: "size", width: "84px", num: true },
+  { id: "parent", label: "% of parent", width: "150px" },
+  { id: "drive", label: "% of drive", width: "76px", num: true },
+  { id: "type", label: "Type", width: "132px" },
+  { id: "category", label: "Category", width: "112px" },
+  { id: "path", label: "Location", width: "27%" },
+];
+
+const list = h("div", { class: "view tw", tabindex: "0", "aria-label": "Folders and files by size" });
+let rows: Located[] = [];
+/** Set when the selected row should be scrolled into view after the next render. */
+let revealRow = false;
+
+function sorted(kids: ViewNode[]) {
+  const { key, dir } = state.sort;
+  const more = (n: ViewNode) => Number(n.kind === "more");
+  return [...kids].sort((a, b) => more(a) - more(b) || dir * (key === "name" ? a.name.localeCompare(b.name) : a.size - b.size));
+}
+
+function listRows(): Located[] {
+  const nodes = scanOf(state.drive)!.nodes;
+  const out: Located[] = [];
+  const walk = (node: ViewNode, chain: ViewNode[]) => {
+    out.push({ node, chain });
+    const kids = state.open.has(node.id) ? nodes.get(node.id)?.children : null;
+    if (kids) for (const c of sorted(kids)) walk(c, [...chain, node]);
+  };
+  walk(nodes.get("root")!, []);
+  return out;
+}
+
+async function toggleRow(node: ViewNode) {
+  if (state.open.has(node.id)) state.open.delete(node.id);
+  else if (canOpen(node)) {
+    await load("nodes", node.id);
+    state.open.add(node.id);
+  }
+  render();
+}
+
+function cell(id: string, { node, chain }: Located) {
+  const d = state.drive!;
+  const parent = chain[chain.length - 1];
+  switch (id) {
+    case "name": {
+      const open = state.open.has(node.id);
+      return h(
+        "td",
+        { title: node.name },
+        h(
+          "div",
+          { class: "name", style: `padding-left:${chain.length * 16}px` },
+          h("button", { class: canOpen(node) ? "arrow" : "arrow none", tabindex: "-1", "aria-label": open ? "Collapse" : "Expand" }, open ? "▼" : "▶"),
+          h("i", { class: "sw", style: `background:${node.kind === "drive" ? "var(--muted)" : catColor(node.category)}` }),
+          h("span", {}, node.name),
+        ),
+      );
+    }
+    case "size":
+      return h("td", { class: "num", title: `${fmtCount(node.size)} bytes` }, fmtBytes(node.size));
+    case "parent":
+      return h("td", {}, h("div", { class: "pc" }, h("span", { class: "meter" }, h("i", { style: `width:${parent ? (node.size / parent.size) * 100 : 100}%` })), parent ? pct(node.size, parent.size) : "100%"));
+    case "drive":
+      return h("td", { class: "num" }, pct(node.size, d.total));
+    case "type":
+      return h("td", { class: "dim" }, kindLabel(node));
+    case "category":
+      return h("td", { class: "dim" }, node.category ? CATEGORIES[node.category] : "");
+    default:
+      return h("td", { class: "dim", title: node.path ?? "" }, node.path ?? "");
+  }
+}
+
+function drawList() {
+  rows = listRows();
+  const sortBy = (key: SortKey) => {
+    state.sort = state.sort.key === key ? { key, dir: -state.sort.dir } : { key, dir: key === "name" ? 1 : -1 };
+    render();
+  };
+  const header = COLUMNS.map((c) => {
+    const { sort } = c;
+    const mark = sort === state.sort.key ? (state.sort.dir < 0 ? " ▾" : " ▴") : "";
+    return h("th", { class: (c.num ? "num " : "") + (sort ? "sortable" : ""), onclick: sort ? () => sortBy(sort) : null }, c.label + mark);
+  });
+  const body = rows.map((row) =>
     h(
-      "div",
-      { class: "dcards" },
-      ...state.drives.map((d) => {
-        const scan = state.scans.get(d.mount);
-        const mine = busy?.drive === d.mount;
-        const root = scan?.cache.get("root") ?? null;
-        return h(
-          "article",
-          { class: "dcard" },
-          h("div", { class: "dcard-head" }, driveIcon(d), h("div", {}, h("h2", {}, driveName(d)), h("p", {}, `${d.kind} · ${d.file_system} · ${fmtBytes(d.total)}`))),
-          usageBar(d, root),
-          h("p", { class: "nums" }, h("span", {}, h("b", {}, fmtBytes(d.total - d.free)), " used"), h("span", {}, `${fmtBytes(d.free)} free`)),
-          mine
-            ? h(
-                "div",
-                { class: "scan" },
-                h("div", { class: "scan-track" }, h("i", {})),
-                h("p", { class: "scan-count", id: "scan-count" }, "Starting…"),
-                h("p", { class: "scan-text", id: "scan-path" }, d.mount),
-                h("button", { class: "btn", onclick: () => invoke("cancel_scan") }, "Cancel"),
-              )
-            : h(
-                "div",
-                { class: "actions" },
-                scan && h("button", { class: "btn primary", disabled: !!busy, onclick: () => showDrive(d) }, "Open"),
-                h("button", { class: "btn" + (scan ? "" : " primary"), disabled: !!busy, onclick: () => startScan(d) }, `${scan ? "Rescan" : "Scan"} ${driveLetter(d.mount)}`),
-              ),
-        );
-      }),
+      "tr",
+      {
+        class: state.selected?.node.id === row.node.id ? "sel" : "",
+        onclick: (e) => {
+          if ((e.target as Element).closest(".arrow") || (e as MouseEvent).detail >= 2) run(() => toggleRow(row.node));
+          else select(row.node, row.chain);
+        },
+      },
+      ...COLUMNS.map((c) => cell(c.id, row)),
     ),
   );
+  list.replaceChildren(
+    h("table", { class: "grid" }, h("colgroup", {}, ...COLUMNS.map((c) => h("col", { style: c.width ? `width:${c.width}` : "" }))), h("thead", {}, h("tr", {}, ...header)), h("tbody", {}, ...body)),
+  );
+  if (revealRow) list.querySelector("tr.sel")?.scrollIntoView({ block: "nearest" });
+  revealRow = false;
+}
+
+list.addEventListener("keydown", (e) => {
+  const i = rows.findIndex((r) => r.node.id === state.selected?.node.id);
+  const row = rows[i];
+  const pick = (r: Located | undefined) => {
+    if (!r) return;
+    revealRow = true;
+    select(r.node, r.chain);
+  };
+  switch (e.key) {
+    case "ArrowDown":
+      pick(rows[i + 1]);
+      break;
+    case "ArrowUp":
+      pick(rows[i - 1]);
+      break;
+    case "ArrowRight":
+      if (!row) return;
+      if (state.open.has(row.node.id)) pick(rows[i + 1]);
+      else run(() => toggleRow(row.node));
+      break;
+    case "ArrowLeft":
+      if (!row) return;
+      if (state.open.has(row.node.id)) run(() => toggleRow(row.node));
+      else pick(rows.find((r) => r.node === row.chain[row.chain.length - 1]));
+      break;
+    case "Enter":
+      if (row) run(() => toggleRow(row.node));
+      break;
+    default:
+      return;
+  }
+  e.preventDefault();
+});
+
+/* ---------- Bottom rows ---------- */
+
+function renderLegend() {
+  const d = state.drive;
+  const root = scanOf(d)?.maps.get("root");
+  const row = h("div", { class: "legend" });
+  if (!d || !root || !showing()) return row;
+  const totals = new Map<Category, number>();
+  for (const c of root.children ?? []) {
+    const cat = c.category ?? "other";
+    totals.set(cat, (totals.get(cat) ?? 0) + c.size);
+  }
+  const item = (label: string, bytes: number, color: string, title?: string) => h("span", { title }, h("i", { class: "sw", style: `background:${color}` }), h("b", {}, label), fmtBytes(bytes));
+  for (const [cat, bytes] of [...totals].sort((a, b) => b[1] - a[1])) row.append(item(CATEGORIES[cat], bytes, catColor(cat)));
+  const unaccounted = d.total - d.free - root.size;
+  if (unaccounted > d.total * 0.005) {
+    row.append(item("Not readable", unaccounted, "var(--muted)", "Folders Windows wouldn't let Storage View read, plus space the file system reserves."));
+  }
+  row.append(item("Free", d.free, "var(--track)"));
+  return row;
+}
+
+function renderSelection() {
+  const d = state.drive;
+  const bar = h("div", { class: "selbar" });
+  // With nothing selected, the map describes the folder it is showing.
+  const n = showing() ? (state.selected?.node ?? (state.tab === "map" ? focus() : null)) : null;
+  if (!d || !n) {
+    bar.append(h("span", { class: "dim" }, !d ? "No drives found" : showing() ? "Nothing selected" : `${driveLetter(d.mount)} has not been scanned`));
+    return bar;
+  }
+  const isDrive = n.kind === "drive";
+  const parent = state.selected ? state.selected.chain[state.selected.chain.length - 1] : null;
+  const more = n.locations.length > 1 ? `  (+${n.locations.length - 1} more)` : "";
+  bar.append(
+    h("span", { class: "name" }, !isDrive && h("i", { class: "sw", style: `background:${catColor(n.category)}` }), h("b", {}, isDrive ? driveName(d) : n.name)),
+    h("span", {}, kindLabel(n) + (n.category ? ` · ${CATEGORIES[n.category]}` : "")),
+    h(
+      "span",
+      {},
+      `${fmtBytes(n.size)} (${fmtCount(n.size)} bytes) · ${pct(n.size, d.total)} of ${driveLetter(d.mount)}` + (parent && parent.kind !== "drive" ? ` · ${pct(n.size, parent.size)} of ${parent.name}` : ""),
+    ),
+    h("span", { class: "p", title: n.locations.length > 1 ? n.locations.map((l) => `${l.path}  ${fmtBytes(l.size)}`).join("\n") : n.path }, n.path && n.path + more),
+  );
+  return bar;
+}
+
+function renderStatus() {
+  const bar = h("footer", { class: "status" });
+  if (state.message) bar.append(h("span", { class: "err", role: "alert" }, state.message));
+  const busy = state.scanning;
+  const s = scanOf(state.drive)?.summary;
+  if (busy) {
+    bar.append(
+      h("span", { class: "prog" }, h("i", {})),
+      h("span", {}, `Scanning ${driveLetter(busy.drive)}`),
+      h("span", { id: "scan-count" }, "Starting…"),
+      h("span", { class: "cur", id: "scan-path" }, busy.drive),
+    );
+  } else if (s) {
+    bar.append(h("span", {}, `${fmtCount(s.files)} files in ${fmtCount(s.dirs)} folders · scanned in ${(s.elapsed_ms / 1000).toFixed(1)} s`));
+    if (s.denied && !state.elevated) bar.append(h("span", { class: "warn" }, `${fmtCount(s.denied)} folders couldn't be read without administrator rights`));
+    else if (s.denied) bar.append(h("span", {}, `${fmtCount(s.denied)} folders are protected by Windows even from administrators`));
+  } else {
+    bar.append(h("span", {}, state.drives.length === 1 ? "1 drive found" : `${state.drives.length} drives found`));
+  }
+  bar.append(h("span", { class: "grow" }));
+  if (state.elevated) bar.append(h("span", { class: "badge" }, h("span", { class: "shield", "aria-hidden": "true" }), "Administrator"));
+  bar.append(h("span", {}, "Read-only: nothing is changed or deleted"));
+  return bar;
 }
 
 function updateProgress() {
@@ -225,228 +531,49 @@ function updateProgress() {
   path.textContent = p.current || p.drive;
 }
 
-/* ---------- Treemap screen ---------- */
+/* ---------- Render ---------- */
 
-function renderSidebar() {
-  return h(
-    "aside",
-    { class: "drives", "aria-label": "Drives" },
-    h("p", { class: "side-h" }, "Drives"),
-    ...state.drives.map((d) => {
-      const scan = state.scans.get(d.mount);
-      return h(
-        "button",
-        {
-          class: "drive-btn",
-          "aria-current": String(d.mount === state.drive?.mount),
-          onclick: () => (scan ? showDrive(d) : startScan(d)),
-        },
-        h("span", { class: "dn" }, d.label || "Local Disk", h("span", {}, driveLetter(d.mount))),
-        usageBar(d, scan?.cache.get("root") ?? null),
-        h("span", { class: "dm" }, scan ? `${fmtBytes(d.total - d.free)} of ${fmtBytes(d.total)}` : "Not scanned yet"),
-      );
-    }),
-    h("button", { class: "btn", onclick: () => ((state.screen = "picker"), render()) }, "All drives"),
-  );
-}
-
-function renderToolbar() {
-  const crumbs = h("nav", { class: "crumbs", "aria-label": "Location" });
-  state.trail.forEach((n, i) => {
-    if (i) crumbs.append(h("span", { class: "sep", "aria-hidden": "true" }, "›"));
-    const current = i === state.trail.length - 1;
-    crumbs.append(
-      h(
-        "button",
-        {
-          "aria-current": current ? "page" : null,
-          onclick: () => {
-            if (current) return;
-            state.trail = state.trail.slice(0, i + 1);
-            state.selected = null;
-            render();
-          },
-        },
-        i === 0 ? driveLetter(n.name) : n.name,
-      ),
-    );
-  });
+function renderView() {
+  if (showing()) return state.tab === "map" ? mapView : list;
+  const d = state.drive;
+  if (!d) return h("div", { class: "view" }, h("div", { class: "empty" }, "No drives found."));
+  const mine = state.scanning?.drive === d.mount;
   return h(
     "div",
-    { class: "toolbar" },
-    h("button", { class: "btn", title: "Up one level (Esc)", disabled: state.trail.length < 2 && !state.selected, onclick: goUp }, "↑ Up"),
-    crumbs,
-    h("span", { class: "total" }, fmtBytes(focus().size)),
-    h("button", { class: "btn", onclick: () => startScan(state.drive!) }, "Rescan"),
-  );
-}
-
-function renderUsage() {
-  const d = state.drive!;
-  const root = state.trail[0];
-  const legend = h("div", { class: "legend" });
-  for (const [cat, bytes] of [...categoryTotals(root)].sort((a, b) => b[1] - a[1])) {
-    legend.append(h("span", {}, h("i", { style: `background:${catColor(cat)}` }), CATEGORIES[cat], " ", h("b", {}, fmtBytes(bytes))));
-  }
-  const unaccounted = d.total - d.free - root.size;
-  if (unaccounted > d.total * 0.005) {
-    legend.append(h("span", { class: "unread", title: "Folders Windows wouldn't let Storage View read, plus space the file system reserves." }, h("i", {}), "Not readable ", h("b", {}, fmtBytes(unaccounted))));
-  }
-  legend.append(h("span", { class: "free" }, h("i", {}), "Free ", h("b", {}, fmtBytes(d.free))));
-  return h("div", { class: "usage" }, usageBar(d, root), legend);
-}
-
-const tip = h("div", { class: "tip", hidden: true });
-function hideTip() {
-  tip.hidden = true;
-}
-function showTip(node: ViewNode | null, e?: MouseEvent) {
-  if (!node || !e) return hideTip();
-  const viz = tip.parentElement!;
-  tip.replaceChildren(
-    h("b", {}, node.name),
-    h("span", {}, `${fmtBytes(node.size)} · ${pct(node.size, focus().size)} of ${state.trail.length > 1 ? focus().name : driveLetter(focus().name)}`),
-    ...(node.path ? [h("em", {}, node.path)] : []),
-    ...(canOpen(node) ? [h("em", {}, "Click to open")] : []),
-  );
-  tip.hidden = false;
-  const r = viz.getBoundingClientRect();
-  let x = e.clientX - r.left + 14;
-  let y = e.clientY - r.top + 14;
-  if (x + tip.offsetWidth > r.width) x = e.clientX - r.left - tip.offsetWidth - 14;
-  if (y + tip.offsetHeight > r.height) y = e.clientY - r.top - tip.offsetHeight - 14;
-  tip.style.transform = `translate(${Math.max(0, x)}px, ${Math.max(0, y)}px)`;
-}
-
-const vizSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-vizSvg.setAttribute("role", "img");
-vizSvg.setAttribute("aria-label", "Disk usage treemap");
-const viz = h("div", { class: "viz" }, vizSvg, tip);
-let frame = 0;
-new ResizeObserver(() => {
-  cancelAnimationFrame(frame);
-  frame = requestAnimationFrame(drawViz);
-}).observe(viz);
-
-function drawViz() {
-  if (state.screen !== "map" || !viz.isConnected) return;
-  const { clientWidth: w, clientHeight: hgt } = viz;
-  if (w < 20 || hgt < 20) return;
-  drawTreemap(vizSvg, focus(), state.selected?.id ?? null, w, hgt, { open, select, hover: showTip });
-}
-
-function kindLabel(n: ViewNode) {
-  switch (n.kind) {
-    case "drive":
-      return "Drive";
-    case "app":
-      return n.locations.length > 1 ? `App · ${n.locations.length} locations` : "App";
-    case "folder":
-      return "Folder";
-    case "file":
-      return "File";
-    case "files":
-      return "Small files";
-    case "more":
-      return "Smaller items";
-  }
-}
-
-function renderDetail() {
-  const n = state.selected ?? focus();
-  const d = state.drive!;
-  const parent = state.selected ? focus() : state.trail[state.trail.length - 2];
-  const isDrive = n.kind === "drive";
-  const kids = n.children?.slice(0, 8) ?? [];
-
-  return h(
-    "aside",
-    { class: "detail", "aria-label": "Details" },
+    { class: "view" },
     h(
       "div",
-      { class: "detail-head" },
-      h("h2", {}, isDrive ? driveName(d) : n.name),
-      h("div", { class: "kind" }, n.category && h("span", { class: "chip" }, h("i", { style: `background:${catColor(n.category)}` }), CATEGORIES[n.category]), h("span", {}, kindLabel(n))),
+      { class: "empty" },
+      h("span", {}, mine ? `Scanning ${driveLetter(d.mount)}…` : `${driveLetter(d.mount)} has not been scanned.`),
+      !mine && button(`Scan ${driveLetter(d.mount)}`, () => startScan(d), !!state.scanning),
     ),
-    h("div", { class: "big" }, fmtBytes(n.size)),
-    h(
-      "div",
-      { class: "share" },
-      ...(isDrive
-        ? [h("div", { class: "meter" }, h("i", { style: `width:${((d.total - d.free) / d.total) * 100}%;background:var(--ink)` })), h("span", {}, `${pct(d.total - d.free, d.total)} of ${fmtBytes(d.total)} used · ${fmtBytes(d.free)} free`)]
-        : [
-            h("div", { class: "meter" }, h("i", { style: `width:${Math.max(0.6, (n.size / d.total) * 100)}%;background:${catColor(n.category)}` })),
-            h("span", {}, `${pct(n.size, d.total)} of ${driveLetter(d.mount)}` + (parent && parent.kind !== "drive" ? ` · ${pct(n.size, parent.size)} of ${parent.name}` : "")),
-          ]),
-    ),
-    n.kind === "files" && h("p", { class: "note" }, "Files under 1 MB in this folder are grouped into one block to keep the map readable."),
-    n.locations.length > 1
-      ? h(
-          "div",
-          { class: "inside" },
-          h("h3", {}, `Found in ${n.locations.length} locations`),
-          h("ol", { class: "locs" }, ...n.locations.map((l) => h("li", {}, h("button", { class: "path link", title: "Show in File Explorer", onclick: () => reveal(l.path) }, l.path), h("span", { class: "sz" }, fmtBytes(l.size))))),
-        )
-      : n.path && h("p", { class: "path" }, n.path),
-    n.path && !isDrive && h("div", { class: "actions" }, h("button", { class: "btn", onclick: () => reveal(n.path!) }, "Show in File Explorer")),
-    kids.length > 0 &&
-      h(
-        "div",
-        { class: "inside" },
-        h("h3", {}, "Largest inside"),
-        h(
-          "ol",
-          {},
-          ...kids.map((c) =>
-            h(
-              "li",
-              {},
-              h(
-                "button",
-                { class: "row", onclick: () => (canOpen(c) ? open(c, state.selected && n !== focus() ? n : null) : select(c)) },
-                h("span", { class: "nm" }, c.name),
-                h("span", { class: "sz" }, fmtBytes(c.size)),
-                h("span", { class: "meter" }, h("i", { style: `width:${(c.size / kids[0].size) * 100}%;background:${catColor(c.category)}` })),
-              ),
-            ),
-          ),
-        ),
-      ),
   );
-}
-
-function renderMap() {
-  return h("div", { class: "map" }, renderSidebar(), h("div", { class: "stage" }, renderToolbar(), renderUsage(), viz), renderDetail());
-}
-
-function renderStatus() {
-  const s = state.drive && state.scans.get(state.drive.mount)?.summary;
-  const bar = h("footer", { class: "statusbar" });
-  if (state.screen === "map" && s) {
-    bar.append(h("span", {}, `${fmtCount(s.files)} files in ${fmtCount(s.dirs)} folders · scanned in ${(s.elapsed_ms / 1000).toFixed(1)} s`));
-    if (s.denied && !state.elevated) {
-      bar.append(h("span", { class: "warn" }, `${fmtCount(s.denied)} folders couldn't be read.`, adminButton(state.drive)));
-    } else if (s.denied) {
-      bar.append(h("span", {}, `${fmtCount(s.denied)} folders are protected by Windows even from administrators.`));
-    }
-  } else {
-    bar.append(h("span", {}, state.scanning ? "Scanning…" : `${state.drives.length} drives found`));
-  }
-  if (state.elevated) bar.append(h("span", { class: "badge" }, h("span", { class: "shield", "aria-hidden": "true" }), "Administrator"));
-  return bar;
 }
 
 function render() {
-  const main = state.screen === "picker" ? renderPicker() : renderMap();
-  app.replaceChildren(main, renderStatus());
-  if (state.screen === "map") drawViz();
-  else updateProgress();
+  const view = renderView();
+  // Re-inserting the list drops its scroll position and keyboard focus, so put both back.
+  const hadFocus = document.activeElement === list;
+  const scroll = list.scrollTop;
+  app.replaceChildren(renderToolbar(), renderNav(), view, ...(showing() ? [renderLegend(), renderSelection()] : []), renderStatus());
+  if (view === mapView) drawMap();
+  else if (view === list) {
+    list.scrollTop = scroll;
+    drawList();
+    if (hadFocus) list.focus();
+  }
+  updateProgress();
 }
 
 /* ---------- Boot ---------- */
 
 document.addEventListener("keydown", (e) => {
-  if (state.screen === "map" && (e.key === "Escape" || (e.key === "Backspace" && !(e.target instanceof HTMLInputElement)))) goUp();
+  if (!showing() || e.target instanceof HTMLInputElement) return;
+  if (e.key === "Backspace") run(goUp);
+  else if (e.key === "Escape" && state.selected) {
+    state.selected = null;
+    render();
+  }
 });
 
 async function boot() {
@@ -458,14 +585,17 @@ async function boot() {
     updateProgress();
   });
 
-  await listen<ScanSummary>("scan-done", async (e) => {
-    const s = e.payload;
-    state.scans.set(s.drive, { summary: s, cache: new Map() });
-    if (state.scanning?.drive === s.drive) state.scanning = null;
-    await refreshDrives();
-    const drive = state.drives.find((d) => d.mount === s.drive);
-    if (drive) await showDrive(drive);
-  });
+  await listen<ScanSummary>("scan-done", (e) =>
+    run(async () => {
+      const s = e.payload;
+      state.scans.set(s.drive, { summary: s, maps: new Map(), nodes: new Map() });
+      if (state.scanning?.drive === s.drive) state.scanning = null;
+      await refreshDrives();
+      // Don't pull the user away from another drive they opened while this one was scanning.
+      if (state.drive?.mount === s.drive) await showDrive(state.drive);
+      else render();
+    }),
+  );
 
   await listen<string>("scan-cancelled", (e) => {
     if (state.scanning?.drive === e.payload) state.scanning = null;
@@ -477,10 +607,11 @@ async function boot() {
   try {
     await refreshDrives();
   } catch (e) {
-    state.error = `Couldn't list drives: ${e}`;
+    state.message = `Couldn't list drives: ${e}`;
   }
   // After restarting as administrator, carry on with the drive the user was looking at.
   const resume = state.drives.find((d) => d.mount.toUpperCase() === status.startup_scan?.toUpperCase());
+  state.drive = resume ?? state.drives[0] ?? null;
   if (resume) await startScan(resume);
   else render();
 }

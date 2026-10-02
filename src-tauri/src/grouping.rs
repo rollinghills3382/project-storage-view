@@ -11,9 +11,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 const UNOWNED: u32 = u32::MAX;
-/// Children returned for the level being viewed, and for each child's preview inside it.
+/// Children returned for the level being viewed, and for each level nested inside it.
 const LIMIT_TOP: usize = 60;
 const LIMIT_PREVIEW: usize = 24;
+/// The treemap nests up to this many levels, but only inside blocks that are at least
+/// 1/`MAP_MIN_SHARE` of the folder being viewed. Anything smaller is too small to draw its contents.
+const MAP_DEPTH: u32 = 6;
+const MAP_MIN_SHARE: u64 = 300;
 
 #[derive(Debug)]
 pub struct Group {
@@ -294,13 +298,21 @@ impl View {
 
     /// The node plus `depth` levels of children, largest first. Long tails are bundled into one "more" entry.
     pub fn view(&self, id: Id, depth: u32) -> ViewNode {
+        self.expand(id, depth, LIMIT_TOP, 0)
+    }
+
+    /// The node as the treemap draws it: nested levels inside every block big enough to show them.
+    pub fn map(&self, id: Id) -> ViewNode {
+        self.expand(id, MAP_DEPTH, LIMIT_TOP, self.size(id) / MAP_MIN_SHARE)
+    }
+
+    fn expand(&self, id: Id, depth: u32, limit: usize, min_size: u64) -> ViewNode {
         let mut v = self.describe(id);
-        if depth == 0 || !v.has_children {
+        if depth == 0 || !v.has_children || v.size < min_size {
             return v;
         }
-        let limit = if depth >= 2 { LIMIT_TOP } else { LIMIT_PREVIEW };
         let kids = self.children(id);
-        let mut out: Vec<ViewNode> = kids.iter().take(limit).map(|&k| self.view(k, depth - 1)).collect();
+        let mut out: Vec<ViewNode> = kids.iter().take(limit).map(|&k| self.expand(k, depth - 1, LIMIT_PREVIEW, min_size)).collect();
         // An app's locations often share a folder name ("Docker"), so label them by path instead.
         if matches!(id, Id::Group(_)) && v.locations.len() > 1 {
             for child in &mut out {
@@ -492,6 +504,30 @@ mod tests {
         assert!(names.iter().any(|n| n.ends_with(r"AppData\Local\Docker")), "{names:?}");
         assert_eq!(short_location(r"C:\Users\me\AppData\Local\Docker"), r"AppData\Local\Docker");
         assert_eq!(short_location(r"C:\Program Files\Docker"), r"Program Files\Docker");
+    }
+
+    #[test]
+    fn map_nests_only_inside_blocks_big_enough_to_draw() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, r"big\a\b\c\d\e\deep.bin", 30);
+        fs::create_dir_all(r.join(r"tiny\inner")).unwrap();
+        fs::write(r.join(r"tiny\inner\note.txt"), vec![0u8; 40_000]).unwrap();
+        let v = View::build(scan(r, &Progress::default()), &[]);
+
+        let root = v.map(Id::Root);
+        let kids = root.children.as_ref().unwrap();
+        assert_eq!(kids.iter().map(|c| c.size).sum::<u64>(), root.size);
+
+        let mut node = kids.iter().find(|c| c.name == "big").unwrap();
+        for name in ["a", "b", "c", "d", "e"] {
+            node = &node.children.as_ref().unwrap_or_else(|| panic!("{} should be nested", node.name))[0];
+            assert_eq!(node.name, name);
+        }
+        assert!(node.has_children && node.children.is_none(), "nesting stops {MAP_DEPTH} levels down");
+
+        let tiny = kids.iter().find(|c| c.name == "tiny").unwrap();
+        assert!(tiny.has_children && tiny.children.is_none(), "too small to draw its contents");
     }
 
     #[test]

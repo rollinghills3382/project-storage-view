@@ -7,6 +7,8 @@ import type { Drive, ScanSummary, ViewNode } from "./ui";
 interface Dump {
   drive: Drive;
   summary: ScanSummary;
+  /** `get_map` and `get_node` results by id, for the drive root and its largest folders. */
+  maps: Record<string, ViewNode>;
   nodes: Record<string, ViewNode>;
 }
 
@@ -14,6 +16,15 @@ export async function install() {
   const res = await fetch("/devdata/scan.json");
   if (!res.ok) throw new Error("No devdata/scan.json. Generate one with the report example (see src/devmock.ts).");
   const dump: Dump = await res.json();
+
+  // Folders that were only saved nested inside another map can still be opened, with what was saved of them.
+  const nested = new Map<string, ViewNode>();
+  const index = (n: ViewNode) => {
+    if (!n.children) return;
+    if (!nested.has(n.id)) nested.set(n.id, n);
+    n.children.forEach(index);
+  };
+  Object.values(dump.maps).forEach(index);
 
   mockIPC(
     (cmd, args) => {
@@ -34,8 +45,9 @@ export async function install() {
             await emit("scan-done", dump.summary);
           });
           return null;
+        case "get_map":
         case "get_node": {
-          const node = dump.nodes[a.id];
+          const node = (cmd === "get_map" ? dump.maps : dump.nodes)[a.id] ?? nested.get(a.id);
           if (!node) throw `Not in the preview data: ${a.id}`;
           return node;
         }

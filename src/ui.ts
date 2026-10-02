@@ -90,3 +90,20 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs = 
   for (const kid of kids) if (kid != null && kid !== false) el.append(kid);
   return el;
 }
+
+export function kindLabel(n: ViewNode): string {
+  switch (n.kind) {
+    case "drive":
+      return "Drive";
+    case "app":
+      return n.locations.length > 1 ? `App · ${n.locations.length} locations` : "App";
+    case "folder":
+      return "Folder";
+    case "file":
+      return "File";
+    case "files":
+      return "Small files";
+    case "more":
+      return "Smaller items";
+  }
+}

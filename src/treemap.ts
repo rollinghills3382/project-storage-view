@@ -1,118 +1,98 @@
 import { hierarchy, treemap, treemapSquarify, type HierarchyRectangularNode } from "d3-hierarchy";
-import { catColor, fmtBytes, type ViewNode } from "./ui";
+import { catColor, fmtBytes, h, type ViewNode } from "./ui";
 
-const NS = "http://www.w3.org/2000/svg";
-const HEADER = 24;
+/** Height of the name strip on a block that shows its contents. */
+const HEAD = 16;
 
 export interface TreemapEvents {
-  /** `parent` is set when a tile inside a top-level block was clicked. */
-  open(node: ViewNode, parent: ViewNode | null): void;
-  select(node: ViewNode): void;
+  /** `chain` lists the blocks the tile sits inside, outermost first. */
+  select(node: ViewNode, chain: ViewNode[]): void;
+  open(node: ViewNode, chain: ViewNode[]): void;
   hover(node: ViewNode | null, e?: MouseEvent): void;
 }
 
 type Rect = HierarchyRectangularNode<ViewNode>;
 
-function svg<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number>): SVGElementTagNameMap[K] {
-  const el = document.createElementNS(NS, tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
-  return el;
-}
-
-function fit(text: string, width: number, charWidth: number): string {
-  const n = Math.floor(width / charWidth);
-  if (n < 3) return "";
-  return text.length <= n ? text : text.slice(0, n - 1) + "…";
-}
-
 export const canOpen = (n: ViewNode) => n.has_children && n.kind !== "more";
 
-/** Draws `focus` and one level of its children. Tile area is proportional to size on disk. */
-export function drawTreemap(el: SVGSVGElement, focus: ViewNode, selectedId: string | null, width: number, height: number, on: TreemapEvents) {
-  el.replaceChildren();
-  el.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  if (!focus.children?.length) return;
-
-  const root = hierarchy<ViewNode>(focus, (n) => n.children ?? undefined)
-    .sum((n) => (n.children ? 0 : n.size))
-    .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
-  const edge = (d: Rect) => (d.depth === 1 ? 3 : 0);
-  const laidOut = treemap<ViewNode>()
-    .size([width, height])
-    .tile(treemapSquarify.ratio(1.3))
-    .round(true)
-    .paddingInner((d) => (d.depth === 0 ? 4 : 2))
-    .paddingTop((d) => (d.depth === 1 ? HEADER : 0))
-    .paddingRight(edge)
-    .paddingBottom(edge)
-    .paddingLeft(edge)(root);
-
-  const tile = (d: Rect, parent: Rect | null, radius: number) => {
-    const w = d.x1 - d.x0;
-    const h = d.y1 - d.y0;
-    const r = svg("rect", { x: d.x0, y: d.y0, width: w, height: h, rx: radius, class: "cell" + (d.data.id === selectedId ? " sel" : "") });
-    r.style.fill = catColor(d.data.category);
-    r.setAttribute("tabindex", "0");
-    r.setAttribute("role", "button");
-    r.setAttribute("aria-label", `${d.data.name}, ${fmtBytes(d.data.size)}`);
-    const activate = () => (canOpen(d.data) ? on.open(d.data, parent?.data ?? null) : on.select(d.data));
-    r.addEventListener("click", activate);
-    r.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        activate();
-      }
-    });
-    r.addEventListener("mouseenter", (e) => on.hover(d.data, e));
-    r.addEventListener("mousemove", (e) => on.hover(d.data, e));
-    r.addEventListener("mouseleave", () => on.hover(null));
-    return r;
+export function createTreemap(on: TreemapEvents) {
+  const el = h("div", { class: "map", role: "img", "aria-label": "Disk usage treemap. Tile area is proportional to size on disk." });
+  const tiles = new WeakMap<Element, Rect>();
+  const hit = (e: Event) => {
+    const tile = (e.target as Element).closest(".tile");
+    return tile ? tiles.get(tile) : undefined;
   };
+  const chain = (d: Rect) => d.ancestors().slice(1, -1).reverse().map((a) => a.data);
 
-  const label = (g: SVGGElement, x: number, y: number, name: string, size: string, maxWidth: number, small: boolean) => {
-    const text = fit(name, maxWidth, small ? 6.4 : 7.2);
-    if (!text) return null;
-    const t = svg("text", { x, y, class: "lbl" + (small ? " sm" : "") });
-    const n = svg("tspan", {});
-    n.textContent = text;
-    t.append(n);
-    if (size) {
-      const s = svg("tspan", { x, dy: small ? 13 : 15, class: "sz" });
-      s.textContent = size;
-      t.append(s);
-    }
-    g.append(t);
-    return t;
-  };
+  el.addEventListener("click", (e) => {
+    const d = hit(e);
+    if (!d) return;
+    if (e.detail >= 2) on.open(d.data, chain(d));
+    else on.select(d.data, chain(d));
+  });
+  el.addEventListener("mousemove", (e) => on.hover(hit(e)?.data ?? null, e));
+  el.addEventListener("mouseleave", () => on.hover(null));
 
-  for (const d of laidOut.children ?? []) {
-    const w = d.x1 - d.x0;
-    const h = d.y1 - d.y0;
-    if (w < 1 || h < 1) continue;
-    const g = svg("g", {});
-    el.append(g);
-    g.append(tile(d, null, 4));
-    if (d.children && h > HEADER + 6) {
-      g.append(svg("rect", { x: d.x0, y: d.y0, width: w, height: h, rx: 4, class: "shade" }));
-      for (const c of d.children) {
-        const cw = c.x1 - c.x0;
-        const ch = c.y1 - c.y0;
-        if (cw < 1 || ch < 1) continue;
-        g.append(tile(c, d, 2));
-        if (cw > 56 && ch > 36) label(g, c.x0 + 6, c.y0 + 15, c.data.name, fmtBytes(c.data.size), cw - 12, true);
-        else if (cw > 56 && ch > 18) label(g, c.x0 + 6, c.y0 + 13, c.data.name, "", cw - 12, true);
+  /**
+   * Draws `focus` with every nested level that fits. `marked` holds the ids of the selected
+   * item and the folders around it; the deepest one that is drawn gets the outline.
+   */
+  function draw(focus: ViewNode, marked: Set<string>) {
+    const width = el.clientWidth;
+    const height = el.clientHeight;
+    el.replaceChildren();
+    if (!focus.children?.length || width < 20 || height < 20) return;
+
+    const root = hierarchy<ViewNode>(focus, (n) => n.children ?? undefined)
+      .sum((n) => (n.children?.length ? 0 : n.size))
+      .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+
+    // A block shows its contents when it has room for a name strip and readable tiles.
+    const groups = new Map<Rect, boolean>();
+    const isGroup = (d: Rect): boolean => {
+      let group = groups.get(d);
+      if (group === undefined) {
+        group = !!d.children && d.depth > 0 && (d.depth === 1 || isGroup(d.parent!)) && d.x1 - d.x0 > 64 && d.y1 - d.y0 > HEAD + 20;
+        groups.set(d, group);
       }
-      const size = fmtBytes(d.data.size);
-      const room = w > 150 ? w - size.length * 6.8 - 26 : w - 16;
-      if (label(g, d.x0 + 8, d.y0 + 16, d.data.name, "", room, false) && w > 150) {
-        const s = svg("text", { x: d.x1 - 8, y: d.y0 + 16, "text-anchor": "end", class: "lbl" });
-        const t = svg("tspan", { class: "sz" });
-        t.textContent = size;
-        s.append(t);
-        g.append(s);
+      return group;
+    };
+    const edge = (d: Rect) => (isGroup(d) ? 1 : 0);
+    const laidOut = treemap<ViewNode>()
+      .size([width, height])
+      .tile(treemapSquarify.ratio(1.3))
+      .round(true)
+      .paddingInner((d) => (d.depth === 0 || isGroup(d) ? 1 : 0))
+      .paddingTop((d) => (isGroup(d) ? HEAD : 0))
+      .paddingRight(edge)
+      .paddingBottom(edge)
+      .paddingLeft(edge)(root);
+
+    const place = (d: Rect) => `left:${d.x0}px;top:${d.y0}px;width:${d.x1 - d.x0}px;height:${d.y1 - d.y0}px`;
+    const out = document.createDocumentFragment();
+    const drawnMarks: Rect[] = [];
+    const visit = (d: Rect) => {
+      const w = d.x1 - d.x0;
+      const hgt = d.y1 - d.y0;
+      if (w < 1 || hgt < 1) return;
+      const group = isGroup(d);
+      const tile = h("div", { class: group ? "tile group" : "tile", style: `${place(d)};--c:${catColor(d.data.category)}` });
+      tiles.set(tile, d);
+      if (group) {
+        tile.append(h("div", { class: "hd" }, h("span", {}, d.data.name), w > 120 && h("span", { class: "sz" }, fmtBytes(d.data.size))));
+      } else if (w > 40 && hgt > 13) {
+        tile.append(h("span", {}, d.data.name));
+        if (hgt > 28) tile.append(h("span", { class: "sz" }, fmtBytes(d.data.size)));
       }
-    } else if (w > 46 && h > 36) {
-      label(g, d.x0 + 8, d.y0 + 18, d.data.name, fmtBytes(d.data.size), w - 16, false);
-    }
+      out.append(tile);
+      if (marked.has(d.data.id)) drawnMarks.push(d);
+      if (group) d.children!.forEach(visit);
+    };
+    laidOut.children?.forEach(visit);
+    const mark = drawnMarks[drawnMarks.length - 1];
+    if (mark) out.append(h("div", { class: "mark", style: place(mark) }));
+    el.append(out);
   }
+
+  return { el, draw };
 }
