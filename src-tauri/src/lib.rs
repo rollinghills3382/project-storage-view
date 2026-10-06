@@ -20,6 +20,31 @@ struct AppState {
     running: Mutex<Option<Arc<scan::Progress>>>,
 }
 
+impl AppState {
+    /// Claims the result slot for `progress` and clears it.
+    ///
+    /// False means a newer scan took over while this one was running, so this scan is
+    /// superseded: it must not store its tree or report anything to the UI, otherwise it
+    /// would overwrite fresher data and reset the progress of the scan the user is watching.
+    fn retire(&self, progress: &Arc<scan::Progress>) -> bool {
+        let mut running = self.running.lock().unwrap();
+        if running.as_ref().is_some_and(|p| Arc::ptr_eq(p, progress)) {
+            *running = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Asks the running scan to stop. The slot stays taken until it actually stops, so a
+    /// scan started right afterwards is not mistaken for the cancelled one.
+    fn cancel(&self) {
+        if let Some(p) = self.running.lock().unwrap().as_ref() {
+            p.cancel.store(true, Relaxed);
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct ProgressEvent {
     drive: String,
@@ -115,6 +140,12 @@ fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<(
             finished.store(true, Relaxed);
             let _ = ticker.join();
 
+            let state = app.state::<AppState>();
+            // A scan that was replaced while walking is dropped whole, so the UI never sees
+            // stale results or a stray "cancelled" for a scan the user never cancelled.
+            if !state.retire(&progress) {
+                return;
+            }
             let Some(view) = view else {
                 let _ = app.emit("scan-cancelled", &drive);
                 return;
@@ -126,13 +157,7 @@ fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<(
                 denied: progress.denied.load(Relaxed),
                 elapsed_ms: started.elapsed().as_millis() as u64,
             };
-            let state = app.state::<AppState>();
             state.views.lock().unwrap().insert(drive, Arc::new(view));
-            let mut running = state.running.lock().unwrap();
-            if running.as_ref().is_some_and(|p| Arc::ptr_eq(p, &progress)) {
-                *running = None;
-            }
-            drop(running);
             let _ = app.emit("scan-done", summary);
         })
         .map_err(|e| e.to_string())?;
@@ -141,9 +166,7 @@ fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<(
 
 #[tauri::command]
 fn cancel_scan(state: State<AppState>) {
-    if let Some(p) = state.running.lock().unwrap().take() {
-        p.cancel.store(true, Relaxed);
-    }
+    state.cancel();
 }
 
 fn lookup(state: &State<AppState>, drive: &str, id: &str) -> Result<(Arc<View>, Id), String> {
@@ -174,4 +197,53 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![app_status, restart_as_admin, list_drives, start_scan, cancel_scan, get_node, get_map])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(state: &AppState) -> Option<Arc<scan::Progress>> {
+        state.running.lock().unwrap().clone()
+    }
+
+    /// A scan that a newer one replaced must report nothing, so it cannot reset the
+    /// progress of the scan the user is actually watching.
+    #[test]
+    fn superseded_scans_report_nothing() {
+        let state = AppState::default();
+        let first = Arc::new(scan::Progress::default());
+        *state.running.lock().unwrap() = Some(first.clone());
+        let second = Arc::new(scan::Progress::default());
+        state.running.lock().unwrap().replace(second.clone());
+
+        assert!(!state.retire(&first), "the replaced scan must not claim the result");
+        assert!(slot(&state).is_some(), "the newer scan still owns the slot");
+        assert!(state.retire(&second));
+        assert!(slot(&state).is_none());
+    }
+
+    /// Cancelling then restarting must not let the old scan's "cancelled" land on the new one.
+    #[test]
+    fn cancelling_keeps_the_slot_so_a_restart_is_not_confused() {
+        let state = AppState::default();
+        let cancelled = Arc::new(scan::Progress::default());
+        *state.running.lock().unwrap() = Some(cancelled.clone());
+
+        state.cancel();
+        assert!(cancelled.cancelled());
+        assert!(state.retire(&cancelled), "the cancelled scan still reports that it stopped");
+
+        let restarted = Arc::new(scan::Progress::default());
+        *state.running.lock().unwrap() = Some(restarted.clone());
+        assert!(state.retire(&restarted));
+        assert!(!restarted.cancelled());
+    }
+
+    #[test]
+    fn cancelling_without_a_scan_does_nothing() {
+        let state = AppState::default();
+        state.cancel();
+        assert!(slot(&state).is_none());
+    }
 }
