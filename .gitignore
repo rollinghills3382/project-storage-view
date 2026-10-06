@@ -8,6 +8,9 @@ desktop.ini
 .idea/
 *.swp
 
+# Agent tooling; worktrees here are full copies of the repo
+.claude/
+
 # Dependencies / build output
 node_modules/
 dist/
