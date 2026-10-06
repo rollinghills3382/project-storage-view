@@ -23,6 +23,29 @@ export function createTreemap(on: TreemapEvents) {
     return tile ? tiles.get(tile) : undefined;
   };
   const chain = (d: Rect) => d.ancestors().slice(1, -1).reverse().map((a) => a.data);
+  const place = (d: Rect) => `left:${d.x0}px;top:${d.y0}px;width:${d.x1 - d.x0}px;height:${d.y1 - d.y0}px`;
+
+  /** Every tile currently drawn, in visit order, and the outline on top of it. Kept so that
+   * changing the selection only moves the outline instead of laying the map out again. */
+  let drawn: Rect[] = [];
+  let mark: HTMLElement | null = null;
+
+  /** Outlines the deepest drawn block that is in `marked`. */
+  function highlight(marked: Set<string>) {
+    let deepest: Rect | undefined;
+    for (const d of drawn) if (marked.has(d.data.id)) deepest = d;
+    if (!deepest) {
+      mark?.remove();
+      mark = null;
+      return;
+    }
+    if (!mark) {
+      mark = h("div", { class: "mark" });
+      el.append(mark);
+    }
+    // Goes through the CSSOM so it is allowed by the app's CSP, like every other style here.
+    mark.style.cssText = place(deepest);
+  }
 
   el.addEventListener("click", (e) => {
     const d = hit(e);
@@ -41,6 +64,8 @@ export function createTreemap(on: TreemapEvents) {
     const width = el.clientWidth;
     const height = el.clientHeight;
     el.replaceChildren();
+    drawn = [];
+    mark = null;
     if (!focus.children?.length || width < 20 || height < 20) return;
 
     const root = hierarchy<ViewNode>(focus, (n) => n.children ?? undefined)
@@ -68,9 +93,7 @@ export function createTreemap(on: TreemapEvents) {
       .paddingBottom(edge)
       .paddingLeft(edge)(root);
 
-    const place = (d: Rect) => `left:${d.x0}px;top:${d.y0}px;width:${d.x1 - d.x0}px;height:${d.y1 - d.y0}px`;
     const out = document.createDocumentFragment();
-    const drawnMarks: Rect[] = [];
     const visit = (d: Rect) => {
       const w = d.x1 - d.x0;
       const hgt = d.y1 - d.y0;
@@ -85,14 +108,13 @@ export function createTreemap(on: TreemapEvents) {
         if (hgt > 28) tile.append(h("span", { class: "sz" }, fmtBytes(d.data.size)));
       }
       out.append(tile);
-      if (marked.has(d.data.id)) drawnMarks.push(d);
+      drawn.push(d);
       if (group) d.children!.forEach(visit);
     };
     laidOut.children?.forEach(visit);
-    const mark = drawnMarks[drawnMarks.length - 1];
-    if (mark) out.append(h("div", { class: "mark", style: place(mark) }));
     el.append(out);
+    highlight(marked);
   }
 
-  return { el, draw };
+  return { el, draw, highlight };
 }

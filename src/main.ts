@@ -156,7 +156,20 @@ function openTile(node: ViewNode, chain: ViewNode[]) {
 
 function select(node: ViewNode, chain: ViewNode[]) {
   state.selected = { node, chain };
-  render();
+  renderSelection();
+}
+
+/** Selecting does not change which folder the map describes, so only the breadcrumb, the
+ * detail bar and the outline are rebuilt. Laying the map out again would replace every tile
+ * for what is, on the map, a single outline moving. */
+function renderSelection() {
+  if (!showing()) return render();
+  if (state.tab === "map") {
+    app.querySelector(".nav")?.replaceWith(renderNav());
+    app.querySelector(".selbar")?.replaceWith(renderSelectionBar());
+    if (map.el.isConnected) map.highlight(markedIds());
+    else render();
+  } else render();
 }
 
 function goUp() {
@@ -266,9 +279,16 @@ function renderNav() {
 
 const tip = h("div", { class: "tip", hidden: true });
 let tipNode: ViewNode | null = null;
+/** Where the pointer is, and the map box measured when it was last drawn, so placing the tip
+ * never has to read layout while the pointer is moving. */
+let tipAt: { x: number; y: number } | null = null;
+let mapRect = new DOMRect();
+let tipFrame = 0;
+
 function hideTip() {
   tip.hidden = true;
   tipNode = null;
+  tipAt = null;
 }
 function showTip(node: ViewNode | null, e?: MouseEvent) {
   if (!node || !e) return hideTip();
@@ -282,11 +302,22 @@ function showTip(node: ViewNode | null, e?: MouseEvent) {
     );
   }
   tip.hidden = false;
-  const r = mapView.getBoundingClientRect();
-  let x = e.clientX - r.left + 14;
-  let y = e.clientY - r.top + 16;
-  if (x + tip.offsetWidth > r.width) x = e.clientX - r.left - tip.offsetWidth - 10;
-  if (y + tip.offsetHeight > r.height) y = e.clientY - r.top - tip.offsetHeight - 10;
+  tipAt = { x: e.clientX, y: e.clientY };
+  // Measuring the tip forces a layout, so it happens once per frame instead of on every
+  // mousemove event.
+  if (!tipFrame) tipFrame = requestAnimationFrame(placeTip);
+}
+
+function placeTip() {
+  tipFrame = 0;
+  const at = tipAt;
+  if (!at || tip.hidden) return;
+  const w = tip.offsetWidth;
+  const hgt = tip.offsetHeight;
+  let x = at.x - mapRect.left + 14;
+  let y = at.y - mapRect.top + 16;
+  if (x + w > mapRect.width) x = at.x - mapRect.left - w - 10;
+  if (y + hgt > mapRect.height) y = at.y - mapRect.top - hgt - 10;
   tip.style.transform = `translate(${Math.max(0, x)}px, ${Math.max(0, y)}px)`;
 }
 
@@ -302,10 +333,16 @@ new ResizeObserver(() => {
   frame = requestAnimationFrame(drawMap);
 }).observe(map.el);
 
+/** Ids the map should outline: the selected item and the blocks around it. */
+function markedIds() {
+  const sel = state.selected;
+  return new Set(sel ? [...sel.chain, sel.node].map((n) => n.id) : []);
+}
+
 function drawMap() {
   if (state.tab !== "map" || !showing() || !map.el.isConnected) return;
-  const sel = state.selected;
-  map.draw(focus(), new Set(sel ? [...sel.chain, sel.node].map((n) => n.id) : []));
+  mapRect = mapView.getBoundingClientRect();
+  map.draw(focus(), markedIds());
 }
 
 /* ---------- List ---------- */
@@ -472,7 +509,7 @@ function renderLegend() {
   return row;
 }
 
-function renderSelection() {
+function renderSelectionBar() {
   const d = state.drive;
   const bar = h("div", { class: "selbar" });
   // With nothing selected, the map describes the folder it is showing.
@@ -555,7 +592,7 @@ function render() {
   // Re-inserting the list drops its scroll position and keyboard focus, so put both back.
   const hadFocus = document.activeElement === list;
   const scroll = list.scrollTop;
-  app.replaceChildren(renderToolbar(), renderNav(), view, ...(showing() ? [renderLegend(), renderSelection()] : []), renderStatus());
+  app.replaceChildren(renderToolbar(), renderNav(), view, ...(showing() ? [renderLegend(), renderSelectionBar()] : []), renderStatus());
   if (view === mapView) drawMap();
   else if (view === list) {
     list.scrollTop = scroll;
@@ -572,7 +609,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Backspace") run(goUp);
   else if (e.key === "Escape" && state.selected) {
     state.selected = null;
-    render();
+    renderSelection();
   }
 });
 
