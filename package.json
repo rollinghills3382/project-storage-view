@@ -8,7 +8,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "cd src-tauri && cargo test"
+    "test": "npm run test:rust && npm run test:ui",
+    "test:rust": "cd src-tauri && cargo test",
+    "test:ui": "node --test tests/ui.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

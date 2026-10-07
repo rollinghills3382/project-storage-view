@@ -1,5 +1,5 @@
 import { hierarchy, treemap, treemapSquarify, type HierarchyRectangularNode } from "d3-hierarchy";
-import { catColor, fmtBytes, h, type ViewNode } from "./ui";
+import { catColor, fmtBytes, h, type ViewNode } from "./ui.ts";
 
 /** Height of the name strip on a block that shows its contents. */
 const HEAD = 16;

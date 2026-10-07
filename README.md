@@ -10,14 +10,15 @@ Storage View is read-only: it never changes or deletes anything.
 
 ## Running it
 
-Requirements: Windows 10/11, [Rust](https://rustup.rs), Node.js 20+, and the Visual Studio
-C++ build tools.
+Requirements: Windows 10/11, [Rust](https://rustup.rs), Node.js 22.18+, and the Visual Studio
+C++ build tools. The Node floor is set by the frontend test runner, which runs TypeScript
+directly; Node 20 reached end of life in April 2026.
 
 ```bash
 npm install
 npm run tauri dev      # run the app
 npm run tauri build    # installer in src-tauri/target/release/bundle/
-npm test               # Rust unit tests
+npm test               # all tests: Rust unit tests, then the frontend
 ```
 
 ## How it works
