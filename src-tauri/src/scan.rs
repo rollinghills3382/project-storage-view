@@ -74,7 +74,11 @@ impl Tree {
                 .iter()
                 .find(|&&c| {
                     let n = self.node(c);
-                    !matches!(n.kind, NodeKind::SmallFiles { .. }) && n.name.to_lowercase() == part
+                    // `part` is already lower case, so the name is folded as it is compared.
+                    // This runs once per sibling per lookup, and a drive's top-level folders
+                    // have hundreds of siblings, so no string is built here.
+                    !matches!(n.kind, NodeKind::SmallFiles { .. })
+                        && n.name.chars().flat_map(char::to_lowercase).eq(part.chars())
                 })?;
         }
         Some(cur)
@@ -260,6 +264,24 @@ mod tests {
         assert_eq!(tree.find(&dir.path().join("missing")), None);
         let sibling = PathBuf::from(format!("{}x", dir.path().display()));
         assert_eq!(tree.find(&sibling), None);
+    }
+
+    /// Lookups fold case the way `to_lowercase` does, not just for ASCII: Windows treats
+    /// these names as equal and so must we.
+    #[test]
+    fn find_folds_case_beyond_ascii() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(&r.join("Ünïcode/ÄÖÜ/data.bin"), 4 * SMALL_FILE_LIMIT as usize);
+        // Big enough to stay its own node rather than being folded into "small files".
+        write(&r.join("MiXeD/CaSe.TxT"), 2 * SMALL_FILE_LIMIT as usize);
+        let tree = scan(r, &Progress::default());
+
+        let id = tree.find(&r.join("ünïcode").join("äöü")).expect("case-folded lookup");
+        assert_eq!(&*tree.node(id).name, "ÄÖÜ");
+        let mixed = tree.find(&r.join("mixed").join("case.txt")).expect("mixed-case lookup");
+        assert_eq!(&*tree.node(mixed).name, "CaSe.TxT");
+        assert_eq!(tree.node(mixed).size, 2 * SMALL_FILE_LIMIT);
     }
 
     #[test]
