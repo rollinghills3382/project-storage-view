@@ -639,7 +639,15 @@ async function boot() {
     render();
   });
 
-  const status = await invoke<{ elevated: boolean; startup_scan: string | null }>("app_status");
+  let status: { elevated: boolean; startup_scan: string | null };
+  try {
+    status = await invoke<{ elevated: boolean; startup_scan: string | null }>("app_status");
+  } catch (e) {
+    // Nothing has been rendered yet, so without this the window would just stay blank.
+    state.message = `Couldn't start: ${e}`;
+    render();
+    return;
+  }
   state.elevated = status.elevated;
   try {
     await refreshDrives();
