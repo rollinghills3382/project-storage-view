@@ -37,15 +37,23 @@ pub struct View {
     eff: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Id {
     Root,
     Group(u32),
     Node(u32),
+    /// The children of another id past the first `usize` of them, reached through a
+    /// "smaller items" tile. The count is carried so the id stays a plain string.
+    Tail(Box<Id>, usize),
 }
 
 impl Id {
     pub fn parse(s: &str) -> Option<Id> {
+        // Split from the right: the base id of a nested tail contains a `~` too.
+        if let Some((base, offset)) = s.rsplit_once('~') {
+            let offset: usize = offset.parse().ok()?;
+            return Some(Id::Tail(Box::new(Id::parse(base)?), offset));
+        }
         if s == "root" {
             return Some(Id::Root);
         }
@@ -58,11 +66,12 @@ impl Id {
         }
     }
 
-    fn key(self) -> String {
+    fn key(&self) -> String {
         match self {
             Id::Root => "root".into(),
             Id::Group(g) => format!("g{g}"),
             Id::Node(n) => format!("n{n}"),
+            Id::Tail(inner, offset) => format!("{}~{offset}", inner.key()),
         }
     }
 }
@@ -214,6 +223,7 @@ impl View {
             Id::Root => true,
             Id::Group(g) => (g as usize) < self.groups.len(),
             Id::Node(n) => (n as usize) < self.tree.nodes.len(),
+            Id::Tail(inner, _) => self.contains(*inner),
         }
     }
 
@@ -222,6 +232,7 @@ impl View {
             Id::Root => self.tree.node(Tree::ROOT).size,
             Id::Group(g) => self.groups[g as usize].size,
             Id::Node(n) => self.eff[n as usize],
+            Id::Tail(inner, offset) => self.children(*inner).iter().skip(offset).map(|c| self.size(c.clone())).sum(),
         }
     }
 
@@ -241,8 +252,9 @@ impl View {
                 locs => locs.iter().copied().filter(|&l| self.eff[l as usize] > 0).map(Id::Node).collect(),
             },
             Id::Node(n) => self.visible_children(n).map(Id::Node).collect(),
+            Id::Tail(inner, offset) => self.children(*inner).into_iter().skip(offset).collect(),
         };
-        out.sort_by_key(|&c| std::cmp::Reverse(self.size(c)));
+        out.sort_by_key(|c| std::cmp::Reverse(self.size(c.clone())));
         out
     }
 
@@ -250,6 +262,9 @@ impl View {
         let mut cur = match id {
             Id::Root => return None,
             Id::Group(g) => return Some(self.groups[g as usize].category),
+            // A "smaller items" tile is part of whatever it hangs off, so it takes that
+            // category; for a folder that is the folder's own.
+            Id::Tail(inner, _) => return self.category(*inner),
             Id::Node(n) => n,
         };
         loop {
@@ -266,7 +281,7 @@ impl View {
     }
 
     fn describe(&self, id: Id) -> ViewNode {
-        let (name, kind, path, locations, has_children) = match id {
+        let (name, kind, path, locations, has_children) = match id.clone() {
             Id::Root => (self.tree.root_path.display().to_string(), "drive", Some(self.tree.root_path.display().to_string()), Vec::new(), true),
             Id::Group(g) => {
                 let group = &self.groups[g as usize];
@@ -292,8 +307,13 @@ impl View {
                 let has_children = node.kind == NodeKind::Dir && self.visible_children(n).next().is_some();
                 (node.name.to_string(), kind, Some(path.display().to_string()), Vec::new(), has_children)
             }
+            Id::Tail(inner, offset) => {
+                let left = self.children(*inner).len().saturating_sub(offset);
+                (format!("{left} smaller items"), "more", None, Vec::new(), left > 0)
+            }
         };
-        ViewNode { id: id.key(), name, size: self.size(id), kind, category: self.category(id), path, locations, has_children, children: None }
+        let key = id.key();
+        ViewNode { id: key, name, size: self.size(id.clone()), kind, category: self.category(id), path, locations, has_children, children: None }
     }
 
     /// The node plus `depth` levels of children, largest first. Long tails are bundled into one "more" entry.
@@ -303,16 +323,17 @@ impl View {
 
     /// The node as the treemap draws it: nested levels inside every block big enough to show them.
     pub fn map(&self, id: Id) -> ViewNode {
-        self.expand(id, MAP_DEPTH, LIMIT_TOP, self.size(id) / MAP_MIN_SHARE)
+        let min_size = self.size(id.clone()) / MAP_MIN_SHARE;
+        self.expand(id, MAP_DEPTH, LIMIT_TOP, min_size)
     }
 
     fn expand(&self, id: Id, depth: u32, limit: usize, min_size: u64) -> ViewNode {
-        let mut v = self.describe(id);
+        let mut v = self.describe(id.clone());
         if depth == 0 || !v.has_children || v.size < min_size {
             return v;
         }
-        let kids = self.children(id);
-        let mut out: Vec<ViewNode> = kids.iter().take(limit).map(|&k| self.expand(k, depth - 1, LIMIT_PREVIEW, min_size)).collect();
+        let kids = self.children(id.clone());
+        let mut out: Vec<ViewNode> = kids.iter().take(limit).map(|k| self.expand(k.clone(), depth - 1, LIMIT_PREVIEW, min_size)).collect();
         // An app's locations often share a folder name ("Docker"), so label them by path instead.
         if matches!(id, Id::Group(_)) && v.locations.len() > 1 {
             for child in &mut out {
@@ -323,14 +344,15 @@ impl View {
         }
         if kids.len() > limit {
             out.push(ViewNode {
-                id: format!("{}~more", v.id),
+                id: Id::Tail(Box::new(id.clone()), limit).key(),
                 name: format!("{} smaller items", kids.len() - limit),
-                size: kids[limit..].iter().map(|&k| self.size(k)).sum(),
+                size: kids[limit..].iter().map(|k| self.size(k.clone())).sum(),
                 kind: "more",
                 category: v.category,
                 path: None,
                 locations: Vec::new(),
-                has_children: false,
+                // Opening the tile lists what is in here, rather than leaving it a dead end.
+                has_children: true,
                 children: None,
             });
         }
@@ -533,9 +555,74 @@ mod tests {
     #[test]
     fn ids_round_trip() {
         for id in [Id::Root, Id::Group(3), Id::Node(12345)] {
-            assert_eq!(Id::parse(&id.key()), Some(id));
+            assert_eq!(Id::parse(&id.key()), Some(id.clone()));
         }
         assert_eq!(Id::parse("x1"), None);
         assert_eq!(Id::parse("n"), None);
+        assert_eq!(Id::parse("~"), None);
+        // A tail nests, and the offset survives the round trip.
+        let tail = Id::Tail(Box::new(Id::Tail(Box::new(Id::Root), 60)), 24);
+        assert_eq!(Id::parse(&tail.key()), Some(tail));
+        assert_eq!(Id::parse("root~60"), Some(Id::Tail(Box::new(Id::Root), 60)));
+    }
+
+    /// The "smaller items" tile used to be a dead end: its id could not even be parsed back.
+    /// Opening it has to list the rest of its parent and still add up to the same total.
+    #[test]
+    fn the_smaller_items_tile_opens_and_adds_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let count = LIMIT_TOP + 7;
+        for i in 0..count {
+            write(r, &format!("d{i:02}/file.bin"), 1);
+        }
+        let tree = scan(r, &Progress::default());
+        let v = View::build(tree, &[]);
+
+        let root = v.view(Id::Root, 2);
+        let more = root.children.unwrap().into_iter().find(|c| c.kind == "more").expect("a smaller items tile");
+        assert_eq!(more.name, "7 smaller items");
+        assert!(more.has_children, "the tile has to be openable to not be a dead end");
+
+        // The id the UI sends back has to resolve.
+        let tail = Id::parse(&more.id).expect("the tile id parses");
+        assert!(v.contains(tail.clone()));
+        assert_eq!(v.size(tail.clone()), more.size);
+
+        let opened = v.view(tail.clone(), 2);
+        assert_eq!(opened.name, "7 smaller items");
+        let kids = opened.children.expect("listing what is inside");
+        assert_eq!(kids.len(), 7);
+        let listed: u64 = kids.iter().map(|k| k.size).sum();
+        assert_eq!(listed, more.size, "the tail adds up to what the tile claimed");
+        assert!(kids.iter().all(|k| k.kind == "folder"), "they are real folders: {kids:?}");
+    }
+
+    /// A folder with far more children than the limit caps over more than once.
+    #[test]
+    fn nested_smaller_items_tiles_keep_going() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let deep = LIMIT_TOP * 2 + 5;
+        for i in 0..deep {
+            write(r, &format!("Users/me/AppData/d{i:03}/file.bin"), 1);
+        }
+        let tree = scan(r, &Progress::default());
+        let v = View::build(tree, &[]);
+        let users = v.tree.find(&r.join("Users/me/AppData")).unwrap();
+
+        let mut id = Id::Node(users);
+        let mut hops = 0;
+        loop {
+            let node = v.view(id.clone(), 2);
+            let more = node.children.into_iter().flatten().find(|c| c.kind == "more");
+            let Some(more) = more else { break };
+            let next = Id::parse(&more.id).expect("each hop parses");
+            assert_eq!(v.size(next.clone()), more.size);
+            id = next;
+            hops += 1;
+            assert!(hops <= 3, "should bottom out rather than loop forever");
+        }
+        assert_eq!(hops, 2, "65 items under one limit of {LIMIT_TOP} needs two hops");
     }
 }

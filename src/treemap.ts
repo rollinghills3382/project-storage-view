@@ -13,7 +13,9 @@ export interface TreemapEvents {
 
 type Rect = HierarchyRectangularNode<ViewNode>;
 
-export const canOpen = (n: ViewNode) => n.has_children && n.kind !== "more";
+/** A tile can be zoomed into when the server says it has children. A "smaller items" tile
+ * counts: it lists the rest of the folder it belongs to. */
+export const canOpen = (n: ViewNode) => n.has_children;
 
 export function createTreemap(on: TreemapEvents) {
   const el = h("div", { class: "map", role: "img", "aria-label": "Disk usage treemap. Tile area is proportional to size on disk." });

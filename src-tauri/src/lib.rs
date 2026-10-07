@@ -171,7 +171,7 @@ fn cancel_scan(state: State<AppState>) {
 
 fn lookup(state: &State<AppState>, drive: &str, id: &str) -> Result<(Arc<View>, Id), String> {
     let view = state.views.lock().unwrap().get(drive).cloned().ok_or_else(|| format!("{drive} has not been scanned yet."))?;
-    let id = Id::parse(id).filter(|&i| view.contains(i)).ok_or_else(|| format!("Unknown item {id}."))?;
+    let id = Id::parse(id).filter(|i| view.contains(i.clone())).ok_or_else(|| format!("Unknown item {id}."))?;
     Ok((view, id))
 }
 
