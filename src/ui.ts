@@ -67,7 +67,8 @@ export function fmtBytes(bytes: number): string {
 export const fmtCount = (n: number) => n.toLocaleString();
 
 export function pct(part: number, whole: number): string {
-  if (whole <= 0) return "0%";
+  // Nothing to compare against, or nothing at all: "less than 0.1%" would be a lie here.
+  if (whole <= 0 || part <= 0) return "0%";
   const p = (part / whole) * 100;
   return (p >= 10 ? p.toFixed(0) : p >= 0.1 ? p.toFixed(1) : "<0.1") + "%";
 }
