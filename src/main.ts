@@ -12,6 +12,7 @@ import {
   h,
   kindLabel,
   pct,
+  scanNotes,
   type Category,
   type Drive,
   type ScanProgress,
@@ -559,8 +560,9 @@ function renderStatus() {
     );
   } else if (s) {
     bar.append(h("span", {}, `${fmtCount(s.files)} files in ${fmtCount(s.dirs)} folders · scanned in ${(s.elapsed_ms / 1000).toFixed(1)} s`));
-    if (s.denied && !state.elevated) bar.append(h("span", { class: "warn" }, `${fmtCount(s.denied)} folders couldn't be read without administrator rights`));
-    else if (s.denied) bar.append(h("span", {}, `${fmtCount(s.denied)} folders are protected by Windows even from administrators`));
+    for (const note of scanNotes(s.errors, state.elevated)) {
+      bar.append(h("span", { class: note.warn ? "warn note" : "note", title: note.detail, tabindex: 0 }, note.text));
+    }
   } else {
     bar.append(h("span", {}, state.drives.length === 1 ? "1 drive found" : `${state.drives.length} drives found`));
   }

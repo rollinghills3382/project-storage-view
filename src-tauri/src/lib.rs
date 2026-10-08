@@ -59,8 +59,8 @@ struct ScanSummary {
     drive: String,
     files: u64,
     dirs: u64,
-    /// Folders Windows would not let us read (usually needs administrator rights).
-    denied: u64,
+    /// Paths that could not be read, by cause, with a few examples of each.
+    errors: scan::ErrorReport,
     elapsed_ms: u64,
 }
 
@@ -154,7 +154,7 @@ fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<(
                 drive: drive.clone(),
                 files: view.tree.file_count(),
                 dirs: progress.dirs.load(Relaxed),
-                denied: progress.denied.load(Relaxed),
+                errors: progress.errors.report(),
                 elapsed_ms: started.elapsed().as_millis() as u64,
             };
             state.views.lock().unwrap().insert(drive, Arc::new(view));
