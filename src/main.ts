@@ -167,6 +167,9 @@ function renderSelection() {
   if (state.tab === "map") {
     app.querySelector(".nav")?.replaceWith(renderNav());
     app.querySelector(".selbar")?.replaceWith(renderSelectionBar());
+    // The breadcrumb above the map was just rebuilt, so re-measure rather than assume the
+    // cached box still holds. One read per click, against none per mousemove.
+    measureMap();
     if (map.el.isConnected) map.highlight(markedIds());
     else render();
   } else render();
@@ -282,6 +285,10 @@ let tipNode: ViewNode | null = null;
 /** Where the pointer is, and the map box measured when it was last drawn, so placing the tip
  * never has to read layout while the pointer is moving. */
 let tipAt: { x: number; y: number } | null = null;
+/** Measured when the chrome is drawn, so the tip never forces a layout of its own. It is
+ * refreshed on every render and selection change, and never while the pointer moves: those
+ * are the only two moments the map can move, and re-reading it per event is what this
+ * avoids. */
 let mapRect = new DOMRect();
 let tipFrame = 0;
 
@@ -339,9 +346,13 @@ function markedIds() {
   return new Set(sel ? [...sel.chain, sel.node].map((n) => n.id) : []);
 }
 
+function measureMap() {
+  if (state.tab === "map" && map.el.isConnected) mapRect = mapView.getBoundingClientRect();
+}
+
 function drawMap() {
   if (state.tab !== "map" || !showing() || !map.el.isConnected) return;
-  mapRect = mapView.getBoundingClientRect();
+  measureMap();
   map.draw(focus(), markedIds());
 }
 

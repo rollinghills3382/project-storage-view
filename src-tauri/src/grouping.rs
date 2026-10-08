@@ -307,6 +307,9 @@ impl View {
                 let has_children = node.kind == NodeKind::Dir && self.visible_children(n).next().is_some();
                 (node.name.to_string(), kind, Some(path.display().to_string()), Vec::new(), has_children)
             }
+            // This walks the parent's children to count what is left, and size() below walks
+            // them again. That is a second sort of a few thousand entries, once per level of
+            // a page, which is not worth threading the answer through to avoid.
             Id::Tail(inner, offset) => {
                 let left = self.children(*inner).len().saturating_sub(offset);
                 (format!("{left} smaller items"), "more", None, Vec::new(), left > 0)

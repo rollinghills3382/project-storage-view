@@ -16,6 +16,13 @@ export async function install() {
   const res = await fetch("/devdata/scan.json");
   if (!res.ok) throw new Error("No devdata/scan.json. Generate one with the report example (see src/devmock.ts).");
   const dump: Dump = await res.json();
+  if (!dump.maps) {
+    // A file saved before `maps` existed still parses, so check rather than crash on it later.
+    throw new Error(
+      "devdata/scan.json is missing its `maps`. It was saved by an older build; regenerate it with " +
+        "cargo run --release --example report -- C:\\ --json ../devdata/scan.json",
+    );
+  }
 
   // Folders that were only saved nested inside another map can still be opened, with what was saved of them.
   const nested = new Map<string, ViewNode>();
