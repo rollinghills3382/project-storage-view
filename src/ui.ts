@@ -34,6 +34,8 @@ export interface ViewNode {
 }
 
 export interface ScanSummary {
+  /** The run that produced these results. Scan events all carry one. */
+  scan: number;
   drive: string;
   files: number;
   dirs: number;
@@ -42,11 +44,17 @@ export interface ScanSummary {
 }
 
 export interface ScanProgress {
+  scan: number;
   drive: string;
   files: number;
   dirs: number;
   bytes: number;
   current: string;
+}
+
+export interface ScanCancelled {
+  scan: number;
+  drive: string;
 }
 
 export const catColor = (c: Category | null) => `var(--c-${c ?? "other"})`;
