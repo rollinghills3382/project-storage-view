@@ -23,6 +23,12 @@ export async function install() {
         "cargo run --release --example report -- C:\\ --json ../devdata/scan.json",
     );
   }
+  if (!dump.maps.root?.categories) {
+    throw new Error(
+      "devdata/scan.json has no category totals on the drive. It was saved by an older build; regenerate it with " +
+        "cargo run --release --example report -- C:\\ --json ../devdata/scan.json",
+    );
+  }
 
   // Folders that were only saved nested inside another map can still be opened, with what was saved of them.
   const nested = new Map<string, ViewNode>();
