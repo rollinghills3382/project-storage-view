@@ -201,7 +201,7 @@ test("an unscanned drive opens straight away with nothing to show", async () => 
 /* ---------- Scan events (#4) ---------- */
 
 const progress = (scan: number, drive = "C:\\") => ({ scan, drive, files: 1, dirs: 1, bytes: 1, current: "" });
-const summary = (scan: number, drive = "C:\\"): ScanSummary => ({ scan, drive, files: 1, dirs: 1, denied: 0, elapsed_ms: 1 });
+const summary = (scan: number, drive = "C:\\"): ScanSummary => ({ scan, drive, files: 1, dirs: 1, elapsed_ms: 1 });
 
 test("a cancelled scan's late events don't touch the rescan of the same drive", () => {
   const runs = new ScanRuns();

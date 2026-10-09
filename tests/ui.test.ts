@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { canOpen } from "../src/treemap.ts";
-import { CATEGORIES, catColor, fmtBytes, fmtCount, pct, type ViewNode } from "../src/ui.ts";
+import { CATEGORIES, catColor, fmtBytes, fmtCount, pct, scanNotes, type ScanErrors, type ScanProblem, type ViewNode } from "../src/ui.ts";
 
 test("fmtBytes uses binary units labelled the way File Explorer does", () => {
   assert.equal(fmtBytes(0), "0 bytes");
@@ -74,4 +74,51 @@ test("fmtCount groups thousands", () => {
   assert.equal(fmtCount(0), "0");
   assert.equal(fmtCount(999), "999");
   assert.equal(fmtCount(1000), "1,000");
+});
+const errors = (counts: Partial<Record<ScanProblem, number>>, samples: ScanErrors["samples"] = []): ScanErrors => ({
+  counts: { denied: 0, vanished: 0, open_dir: 0, list_dir: 0, file_type: 0, metadata: 0, cloud_size: 0, ...counts },
+  samples,
+});
+
+test("scanNotes says nothing for a clean scan or preview data without errors", () => {
+  assert.deepEqual(scanNotes(undefined, false), []);
+  assert.deepEqual(scanNotes(errors({}), true), []);
+});
+
+test("scanNotes only blames permissions for permission failures", () => {
+  const io = errors({ open_dir: 2, list_dir: 1, file_type: 1, metadata: 1 }, [{ kind: "open_dir", path: "D:\\Bad", message: "The request could not be performed because of an I/O device error." }]);
+  for (const elevated of [false, true]) {
+    const notes = scanNotes(io, elevated);
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].text, "Scan incomplete: 5 items couldn't be read");
+    assert.ok(notes[0].warn);
+    assert.doesNotMatch(notes[0].text, /administrator|protected/);
+    assert.equal(notes[0].detail, "D:\\Bad: The request could not be performed because of an I/O device error.\nand 4 more");
+  }
+});
+
+test("scanNotes offers administrator rights only for denials, and calls them protected only once elevated", () => {
+  const denied = errors({ denied: 3 }, [{ kind: "denied", path: "C:\\System Volume Information", message: "Access is denied." }]);
+  assert.deepEqual(scanNotes(denied, false), [{ text: "3 items couldn't be read without administrator rights", warn: true, detail: "C:\\System Volume Information: Access is denied.\nand 2 more" }]);
+  assert.equal(scanNotes(denied, true)[0].text, "3 items protected by Windows even from administrators");
+  assert.equal(scanNotes(denied, true)[0].warn, false);
+});
+
+test("scanNotes keeps each kind of problem separate", () => {
+  const mixed = errors({ denied: 1, vanished: 2, metadata: 1, cloud_size: 1 }, [
+    { kind: "vanished", path: "C:\\tmp\\a", message: "not found" },
+    { kind: "cloud_size", path: "C:\\OneDrive\\v.mp4", message: "The cloud file provider is not running." },
+  ]);
+  const notes = scanNotes(mixed, false);
+  assert.deepEqual(
+    notes.map((n) => n.text),
+    [
+      "Scan incomplete: 1 item couldn't be read",
+      "1 cloud file couldn't be measured and count as 0 bytes",
+      "1 item couldn't be read without administrator rights",
+      "2 items changed or were removed during the scan",
+    ],
+  );
+  assert.equal(notes[1].detail, "C:\\OneDrive\\v.mp4: The cloud file provider is not running.");
+  assert.equal(notes[3].warn, false, "a file deleted mid-scan is not a failure to read data that exists");
 });

@@ -1,7 +1,9 @@
 //! Parallel directory walk that turns a drive into a compact in-memory tree.
 
 use rayon::prelude::*;
+use serde::Serialize;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Mutex;
@@ -102,7 +104,7 @@ pub struct Progress {
     pub files: AtomicU64,
     pub dirs: AtomicU64,
     pub bytes: AtomicU64,
-    pub denied: AtomicU64,
+    pub errors: ErrorLog,
     pub current: Mutex<String>,
     pub cancel: AtomicBool,
     /// Tests cancel deterministically once this many files have been counted, which is
@@ -118,6 +120,150 @@ impl Progress {
             return true;
         }
         self.cancel.load(Relaxed)
+    }
+}
+
+/// The step of the walk that failed, which decides how an error is described when its
+/// cause does not say more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Opening a folder to list it.
+    OpenDir,
+    /// Reading the next entry of a folder that did open.
+    ListDir,
+    FileType,
+    Metadata,
+    /// Measuring how much of a cloud file is stored locally.
+    CloudSize,
+}
+
+/// What went wrong reading one path, as the user is told about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Problem {
+    /// Windows refused access. The only kind that running as administrator can help with.
+    Denied,
+    /// The path was deleted or moved while the scan ran, so there is nothing to count.
+    Vanished,
+    OpenDir,
+    ListDir,
+    FileType,
+    Metadata,
+    CloudSize,
+}
+
+impl Problem {
+    pub fn classify(stage: Stage, err: &io::Error) -> Self {
+        match err.kind() {
+            io::ErrorKind::PermissionDenied => return Problem::Denied,
+            io::ErrorKind::NotFound => return Problem::Vanished,
+            _ => {}
+        }
+        // ERROR_DELETE_PENDING: deleted, but another program still has it open.
+        #[cfg(windows)]
+        if err.raw_os_error() == Some(303) {
+            return Problem::Vanished;
+        }
+        match stage {
+            Stage::OpenDir => Problem::OpenDir,
+            Stage::ListDir => Problem::ListDir,
+            Stage::FileType => Problem::FileType,
+            Stage::Metadata => Problem::Metadata,
+            Stage::CloudSize => Problem::CloudSize,
+        }
+    }
+}
+
+/// Paths kept per kind of problem. A drive that fails everywhere still yields a short report,
+/// and one kind cannot crowd out the examples of another.
+pub const ERROR_SAMPLES_PER_KIND: usize = 20;
+const ERROR_MESSAGE_LIMIT: usize = 200;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ErrorCounts {
+    pub denied: u64,
+    pub vanished: u64,
+    pub open_dir: u64,
+    pub list_dir: u64,
+    pub file_type: u64,
+    pub metadata: u64,
+    pub cloud_size: u64,
+}
+
+impl ErrorCounts {
+    fn slot(&mut self, kind: Problem) -> &mut u64 {
+        match kind {
+            Problem::Denied => &mut self.denied,
+            Problem::Vanished => &mut self.vanished,
+            Problem::OpenDir => &mut self.open_dir,
+            Problem::ListDir => &mut self.list_dir,
+            Problem::FileType => &mut self.file_type,
+            Problem::Metadata => &mut self.metadata,
+            Problem::CloudSize => &mut self.cloud_size,
+        }
+    }
+
+    pub fn get(&self, kind: Problem) -> u64 {
+        match kind {
+            Problem::Denied => self.denied,
+            Problem::Vanished => self.vanished,
+            Problem::OpenDir => self.open_dir,
+            Problem::ListDir => self.list_dir,
+            Problem::FileType => self.file_type,
+            Problem::Metadata => self.metadata,
+            Problem::CloudSize => self.cloud_size,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ErrorSample {
+    pub kind: Problem,
+    pub path: String,
+    pub message: String,
+}
+
+/// Everything that could not be read, for the scan summary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ErrorReport {
+    pub counts: ErrorCounts,
+    pub samples: Vec<ErrorSample>,
+}
+
+/// Collects read failures while the scan runs. Failures are rare enough that one lock is
+/// cheaper than it looks, and it keeps each count and its samples consistent.
+#[derive(Default)]
+pub struct ErrorLog {
+    report: Mutex<ErrorReport>,
+}
+
+impl ErrorLog {
+    pub fn record(&self, stage: Stage, path: &Path, err: &io::Error) -> Problem {
+        let kind = Problem::classify(stage, err);
+        let mut r = self.report.lock().unwrap_or_else(|e| e.into_inner());
+        let n = r.counts.slot(kind);
+        *n += 1;
+        if *n as usize <= ERROR_SAMPLES_PER_KIND {
+            let mut message = err.to_string();
+            if message.len() > ERROR_MESSAGE_LIMIT {
+                let mut end = ERROR_MESSAGE_LIMIT;
+                while !message.is_char_boundary(end) {
+                    end -= 1;
+                }
+                message.truncate(end);
+                message.push('…');
+            }
+            r.samples.push(ErrorSample { kind, path: path.display().to_string(), message });
+        }
+        kind
+    }
+
+    pub fn count(&self, kind: Problem) -> u64 {
+        self.report.lock().unwrap_or_else(|e| e.into_inner()).counts.get(kind)
+    }
+
+    pub fn report(&self) -> ErrorReport {
+        self.report.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -148,19 +294,34 @@ fn walk(path: &Path, name: String, p: &Progress) -> TmpDir {
     }
     let entries = match fs::read_dir(path) {
         Ok(e) => e,
-        Err(_) => {
-            p.denied.fetch_add(1, Relaxed);
+        Err(e) => {
+            p.errors.record(Stage::OpenDir, path, &e);
             return out;
         }
     };
     let mut subdirs = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
         // Checked per entry, not just per folder: one folder can hold hundreds of
         // thousands of files, and Stop should not wait for all of them.
         if p.cancelled() {
             return out;
         }
-        let Ok(ft) = entry.file_type() else { continue };
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                // The rest of the listing is lost, but what was read so far still counts.
+                // Stop here: a listing that keeps failing could otherwise repeat forever.
+                p.errors.record(Stage::ListDir, path, &e);
+                break;
+            }
+        };
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                p.errors.record(Stage::FileType, &entry.path(), &e);
+                continue;
+            }
+        };
         // Junctions and symlinks point at data that is counted where it really lives.
         if ft.is_symlink() {
             continue;
@@ -171,8 +332,22 @@ fn walk(path: &Path, name: String, p: &Progress) -> TmpDir {
             continue;
         }
         // On Windows this comes from the directory listing itself, with no extra file open.
-        let Ok(md) = entry.metadata() else { continue };
-        let size = size_on_disk(&md);
+        let md = match entry.metadata() {
+            Ok(md) => md,
+            Err(e) => {
+                p.errors.record(Stage::Metadata, &entry.path(), &e);
+                continue;
+            }
+        };
+        let size = match size_on_disk(&entry.path(), &md) {
+            Ok(size) => size,
+            Err(e) => {
+                // The file is listed but its local size is unknown, so it adds nothing rather
+                // than a guess, and the summary says how many files that was.
+                p.errors.record(Stage::CloudSize, &entry.path(), &e);
+                0
+            }
+        };
         p.files.fetch_add(1, Relaxed);
         p.bytes.fetch_add(size, Relaxed);
         if size < SMALL_FILE_LIMIT {
@@ -191,23 +366,83 @@ fn walk(path: &Path, name: String, p: &Progress) -> TmpDir {
     out
 }
 
-/// Cloud-only placeholders (OneDrive "files on demand") report their full size but use no disk space.
-#[cfg(windows)]
-fn size_on_disk(md: &fs::Metadata) -> u64 {
-    use std::os::windows::fs::MetadataExt;
-    const OFFLINE: u32 = 0x1000;
-    const RECALL_ON_OPEN: u32 = 0x4_0000;
-    const RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
-    if md.file_attributes() & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0 {
-        0
-    } else {
-        md.len()
+const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
+const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x4_0000;
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+const NOT_FULLY_LOCAL: u32 = FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+
+/// Bytes a file takes on this disk.
+///
+/// A cloud file (OneDrive "files on demand" and other Cloud Files providers) reports its full
+/// size whether or not its data is here. Those attributes only say the file is not *fully*
+/// local: a partly downloaded file has some of its data on disk. So such a file is measured
+/// with `allocated`, and a fully local one keeps its plain length.
+fn resident_size(attributes: u32, len: u64, allocated: impl FnOnce() -> io::Result<u64>) -> io::Result<u64> {
+    if attributes & NOT_FULLY_LOCAL == 0 {
+        return Ok(len);
     }
+    // Allocation is rounded up to whole clusters; a file never counts for more than its length.
+    Ok(allocated()?.min(len))
+}
+
+#[cfg(windows)]
+fn size_on_disk(path: &Path, md: &fs::Metadata) -> io::Result<u64> {
+    use std::os::windows::fs::MetadataExt;
+    resident_size(md.file_attributes(), md.len(), || allocated_without_recall(path))
 }
 
 #[cfg(not(windows))]
-fn size_on_disk(md: &fs::Metadata) -> u64 {
-    md.len()
+fn size_on_disk(_path: &Path, md: &fs::Metadata) -> io::Result<u64> {
+    resident_size(0, md.len(), || unreachable!("only Windows has cloud placeholders"))
+}
+
+/// Disk space allocated to a cloud file's local data, read without downloading anything.
+///
+/// The file is opened for `FILE_READ_ATTRIBUTES` only, which grants no access to its data, with
+/// `FILE_FLAG_OPEN_NO_RECALL` (Windows' documented flag for "leave the data in remote storage")
+/// and `FILE_FLAG_OPEN_REPARSE_POINT`, which opens the placeholder itself so the cloud provider
+/// is not asked to act. `GetFileInformationByHandleEx(FileStandardInfo)` then reads the
+/// allocation size from file system metadata. None of these read file contents, so the
+/// provider sees no data access and hydration and pinning stay as they were.
+#[cfg(windows)]
+fn allocated_without_recall(path: &Path) -> io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FileStandardInfo, GetFileInformationByHandleEx, FILE_FLAG_OPEN_NO_RECALL, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `wide` is a NUL-terminated path that outlives the call, and the handle is
+    // closed before returning on every path.
+    unsafe {
+        let handle = CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_NO_RECALL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut info: FILE_STANDARD_INFO = std::mem::zeroed();
+        let ok = GetFileInformationByHandleEx(
+            handle,
+            FileStandardInfo,
+            (&mut info as *mut FILE_STANDARD_INFO).cast(),
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        );
+        let err = (ok == 0).then(io::Error::last_os_error);
+        CloseHandle(handle);
+        match err {
+            Some(e) => Err(e),
+            None => Ok(info.AllocationSize.max(0) as u64),
+        }
+    }
 }
 
 fn flatten(tmp: TmpDir, parent: u32, nodes: &mut Vec<Node>) -> u32 {
@@ -305,6 +540,121 @@ mod tests {
         p.cancel.store(true, Relaxed);
         let tree = scan(dir.path(), &p);
         assert_eq!(tree.nodes.len(), 1);
+    }
+
+    fn err(kind: io::ErrorKind) -> io::Error {
+        io::Error::new(kind, "test failure")
+    }
+
+    #[test]
+    fn errors_are_classified_by_cause_before_stage() {
+        use Stage::*;
+        for stage in [OpenDir, ListDir, FileType, Metadata, CloudSize] {
+            assert_eq!(Problem::classify(stage, &err(io::ErrorKind::PermissionDenied)), Problem::Denied);
+            assert_eq!(Problem::classify(stage, &err(io::ErrorKind::NotFound)), Problem::Vanished);
+        }
+        // Anything else is an I/O failure of the step that hit it, never an access denial.
+        assert_eq!(Problem::classify(OpenDir, &err(io::ErrorKind::Other)), Problem::OpenDir);
+        assert_eq!(Problem::classify(ListDir, &err(io::ErrorKind::UnexpectedEof)), Problem::ListDir);
+        assert_eq!(Problem::classify(FileType, &err(io::ErrorKind::InvalidData)), Problem::FileType);
+        assert_eq!(Problem::classify(Metadata, &err(io::ErrorKind::TimedOut)), Problem::Metadata);
+        assert_eq!(Problem::classify(CloudSize, &err(io::ErrorKind::Unsupported)), Problem::CloudSize);
+    }
+
+    #[test]
+    fn error_samples_stay_bounded_per_kind() {
+        let log = ErrorLog::default();
+        for i in 0..1000 {
+            log.record(Stage::OpenDir, &PathBuf::from(format!("/denied/{i}")), &err(io::ErrorKind::PermissionDenied));
+        }
+        log.record(Stage::Metadata, Path::new("/io/file"), &io::Error::other("x".repeat(10_000)));
+        let r = log.report();
+        assert_eq!(r.counts.denied, 1000);
+        assert_eq!(r.counts.metadata, 1);
+        assert_eq!(r.samples.len(), ERROR_SAMPLES_PER_KIND + 1);
+        // A flood of one kind does not hide the other.
+        let io = r.samples.iter().find(|s| s.kind == Problem::Metadata).unwrap();
+        assert_eq!(io.path, "/io/file");
+        assert!(io.message.len() <= ERROR_MESSAGE_LIMIT + '…'.len_utf8());
+    }
+
+    #[test]
+    fn a_folder_that_vanished_mid_scan_is_reported_as_vanished() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Progress::default();
+        let out = walk(&dir.path().join("deleted meanwhile"), "x".into(), &p);
+        assert!(out.files.is_empty() && out.dirs.is_empty() && out.small_count == 0);
+        let r = p.errors.report();
+        assert_eq!(r.counts, ErrorCounts { vanished: 1, ..Default::default() });
+        assert!(r.samples[0].path.ends_with("deleted meanwhile"));
+    }
+
+    #[test]
+    fn a_folder_that_fails_to_open_for_other_reasons_is_not_called_denied() {
+        // Listing a file as a folder fails with "not a directory": a real I/O failure that has
+        // nothing to do with permissions.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not a folder");
+        write(&file, 10);
+        let p = Progress::default();
+        walk(&file, "x".into(), &p);
+        let c = p.errors.report().counts;
+        assert_eq!(c, ErrorCounts { open_dir: 1, ..Default::default() });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_leaves_the_rest_of_the_scan_usable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(&r.join("ok/big.bin"), 2 * SMALL_FILE_LIMIT as usize);
+        write(&r.join("locked/hidden.bin"), 10);
+        let locked = r.join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads through permissions, so the denial only happens for other users.
+        let denied = fs::read_dir(&locked).is_err();
+
+        let p = Progress::default();
+        let tree = scan(r, &p);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(tree.node(Tree::ROOT).size, 2 * SMALL_FILE_LIMIT + if denied { 0 } else { 10 });
+        assert!(tree.find(&r.join("ok/big.bin")).is_some());
+        let report = p.errors.report();
+        let expected = if denied { ErrorCounts { denied: 1, ..Default::default() } } else { ErrorCounts::default() };
+        assert_eq!(report.counts, expected);
+        if denied {
+            assert_eq!(report.samples[0].path, locked.display().to_string());
+        }
+    }
+
+    const PLACEHOLDER: u32 = FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+
+    #[test]
+    fn a_fully_remote_cloud_file_counts_nothing() {
+        assert_eq!(resident_size(PLACEHOLDER, 5_000_000, || Ok(0)).unwrap(), 0);
+        assert_eq!(resident_size(FILE_ATTRIBUTE_OFFLINE, 5_000_000, || Ok(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_partly_downloaded_cloud_file_counts_its_local_bytes() {
+        assert_eq!(resident_size(PLACEHOLDER, 5_000_000, || Ok(1_048_576)).unwrap(), 1_048_576);
+        assert_eq!(resident_size(FILE_ATTRIBUTE_RECALL_ON_OPEN, 5_000_000, || Ok(4096)).unwrap(), 4096);
+        // Cluster rounding never makes a file count for more than its length.
+        assert_eq!(resident_size(PLACEHOLDER, 1000, || Ok(4096)).unwrap(), 1000);
+    }
+
+    #[test]
+    fn a_fully_local_file_keeps_its_length_without_a_query() {
+        let size = resident_size(0x20 /* ARCHIVE */, 5_000_000, || panic!("local files need no extra query"));
+        assert_eq!(size.unwrap(), 5_000_000);
+    }
+
+    #[test]
+    fn a_failed_size_query_is_an_error_not_zero() {
+        let e = resident_size(PLACEHOLDER, 5_000_000, || Err(io::Error::other("provider not running"))).unwrap_err();
+        assert_eq!(Problem::classify(Stage::CloudSize, &e), Problem::CloudSize);
     }
 
     /// A cancel that arrives while one large folder is being listed stops that listing,
