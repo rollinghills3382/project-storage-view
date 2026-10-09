@@ -39,6 +39,7 @@ export async function install() {
   };
   Object.values(dump.maps).forEach(index);
 
+  let lastScan = 0;
   mockIPC(
     (cmd, args) => {
       const a = args as Record<string, string>;
@@ -49,15 +50,17 @@ export async function install() {
           throw "Restarting as administrator only works in the desktop app.";
         case "list_drives":
           return [dump.drive];
-        case "start_scan":
+        case "start_scan": {
+          const scan = ++lastScan;
           setTimeout(async () => {
             for (let i = 1; i <= 5; i++) {
-              await emit("scan-progress", { drive: a.drive, files: (dump.summary.files * i) / 5, dirs: 0, bytes: 0, current: `${a.drive}Users` });
+              await emit("scan-progress", { scan, drive: a.drive, files: (dump.summary.files * i) / 5, dirs: 0, bytes: 0, current: `${a.drive}Users` });
               await new Promise((r) => setTimeout(r, 200));
             }
-            await emit("scan-done", dump.summary);
+            await emit("scan-done", { ...dump.summary, scan });
           });
-          return null;
+          return scan;
+        }
         case "get_map":
         case "get_node": {
           const node = (cmd === "get_map" ? dump.maps : dump.nodes)[a.id] ?? nested.get(a.id);

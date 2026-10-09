@@ -21,10 +21,10 @@ fn main() {
     let installed = apps::installed_apps();
     let view = View::build(tree, &installed);
     println!(
-        "{} · {} files · {} unreadable folders · {} registered apps · {:.1} s\n",
+        "{} · {} files · {} paths denied · {} registered apps · {:.1} s\n",
         root.display(),
         view.tree.file_count(),
-        progress.denied.load(std::sync::atomic::Ordering::Relaxed),
+        progress.errors.count(scan::Problem::Denied),
         installed.len(),
         started.elapsed().as_secs_f64()
     );
@@ -39,7 +39,7 @@ fn main() {
 
     if let Some(out) = json_out {
         let count = |n: &std::sync::atomic::AtomicU64| n.load(std::sync::atomic::Ordering::Relaxed);
-        write_json(&view, &root, started.elapsed().as_millis() as u64, count(&progress.dirs), count(&progress.denied), &out);
+        write_json(&view, &root, started.elapsed().as_millis() as u64, count(&progress.dirs), &progress.errors.report(), &out);
     }
 }
 
@@ -71,7 +71,7 @@ fn save(
     Some(m)
 }
 
-fn write_json(view: &View, root: &std::path::Path, elapsed_ms: u64, dirs: u64, denied: u64, out: &str) {
+fn write_json(view: &View, root: &std::path::Path, elapsed_ms: u64, dirs: u64, errors: &scan::ErrorReport, out: &str) {
     // `maps` is what `get_map` returns for an id and `nodes` what `get_node` returns.
     let mut maps = serde_json::Map::new();
     let mut nodes = serde_json::Map::new();
@@ -118,7 +118,7 @@ fn write_json(view: &View, root: &std::path::Path, elapsed_ms: u64, dirs: u64, d
     let drive = drives::list().into_iter().find(|d| d.mount.eq_ignore_ascii_case(&root.display().to_string()));
     let doc = serde_json::json!({
         "drive": drive,
-        "summary": { "drive": root.display().to_string(), "files": view.tree.file_count(), "dirs": dirs, "denied": denied, "elapsed_ms": elapsed_ms },
+        "summary": { "drive": root.display().to_string(), "files": view.tree.file_count(), "dirs": dirs, "errors": errors, "elapsed_ms": elapsed_ms },
         "maps": maps,
         "nodes": nodes,
     });

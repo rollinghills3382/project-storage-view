@@ -36,20 +36,73 @@ export interface ViewNode {
   categories?: { category: Category; size: number }[];
 }
 
+/** Why a path could not be read. Only `denied` is something administrator rights can fix. */
+export type ScanProblem = "denied" | "vanished" | "open_dir" | "list_dir" | "file_type" | "metadata" | "cloud_size";
+
+export interface ScanErrors {
+  counts: Record<ScanProblem, number>;
+  /** A few affected paths per kind; `counts` has the full numbers. */
+  samples: { kind: ScanProblem; path: string; message: string }[];
+}
+
 export interface ScanSummary {
+  /** The run that produced these results. Scan events all carry one. */
+  scan: number;
   drive: string;
   files: number;
   dirs: number;
-  denied: number;
+  /** Missing from preview data saved by older builds. */
+  errors?: ScanErrors;
   elapsed_ms: number;
 }
 
+export interface ScanNote {
+  text: string;
+  warn: boolean;
+  /** Affected paths and their errors, one per line, for the note's tooltip. */
+  detail: string;
+}
+
+const READ_FAILURES: ScanProblem[] = ["open_dir", "list_dir", "file_type", "metadata"];
+
+/**
+ * Status-bar notes for what a scan could not read. Only permission failures are described as
+ * protected or as needing administrator rights; any other failure means the scan is incomplete.
+ */
+export function scanNotes(errors: ScanErrors | undefined, elevated: boolean): ScanNote[] {
+  if (!errors) return [];
+  const count = (kinds: ScanProblem[]) => kinds.reduce((sum, k) => sum + (errors.counts[k] ?? 0), 0);
+  const detail = (kinds: ScanProblem[]) => {
+    const shown = errors.samples.filter((s) => kinds.includes(s.kind));
+    const rest = count(kinds) - shown.length;
+    return [...shown.map((s) => `${s.path}: ${s.message}`), ...(rest > 0 ? [`and ${fmtCount(rest)} more`] : [])].join("\n");
+  };
+  const items = (n: number) => (n === 1 ? "1 item" : `${fmtCount(n)} items`);
+  const notes: ScanNote[] = [];
+  const add = (kinds: ScanProblem[], warn: boolean, text: (n: number) => string) => {
+    const n = count(kinds);
+    if (n) notes.push({ text: text(n), warn, detail: detail(kinds) });
+  };
+  add(READ_FAILURES, true, (n) => `Scan incomplete: ${items(n)} couldn't be read`);
+  add(["cloud_size"], true, (n) => `${n === 1 ? "1 cloud file" : `${fmtCount(n)} cloud files`} couldn't be measured and count as 0 bytes`);
+  if (elevated) add(["denied"], false, (n) => `${items(n)} protected by Windows even from administrators`);
+  else add(["denied"], true, (n) => `${items(n)} couldn't be read without administrator rights`);
+  add(["vanished"], false, (n) => `${items(n)} changed or were removed during the scan`);
+  return notes;
+}
+
 export interface ScanProgress {
+  scan: number;
   drive: string;
   files: number;
   dirs: number;
   bytes: number;
   current: string;
+}
+
+export interface ScanCancelled {
+  scan: number;
+  drive: string;
 }
 
 export const catColor = (c: Category | null) => `var(--c-${c ?? "other"})`;

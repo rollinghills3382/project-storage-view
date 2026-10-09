@@ -137,6 +137,7 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; table-la
 .selbar .p { overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-family: var(--f-mono); }
 .status { background: var(--panel); color: var(--muted); }
 .status .warn { color: var(--warn); }
+.status .note[title]:not([title=""]) { cursor: help; }
 .status .err { color: var(--danger); overflow: hidden; text-overflow: ellipsis; }
 .status .cur { overflow: hidden; text-overflow: ellipsis; }
 .status .prog { flex: none; width: 120px; height: 8px; background: var(--track); overflow: hidden; }
