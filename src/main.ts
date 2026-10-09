@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { navigator, type Located } from "./nav";
+import { isNewer, ScanRuns } from "./scanrun";
 import { canOpen, createTreemap } from "./treemap";
 import {
   CATEGORIES,
@@ -14,6 +16,7 @@ import {
   pct,
   type Category,
   type Drive,
+  type ScanCancelled,
   type ScanProgress,
   type ScanSummary,
   type ViewNode,
@@ -25,12 +28,6 @@ interface DriveScan {
   maps: Map<string, ViewNode>;
   /** `get_node` results: a node with its children, which is what a list row expands to. */
   nodes: Map<string, ViewNode>;
-}
-
-/** An item and the folders it sits inside, from the drive root down to its parent. */
-interface Located {
-  node: ViewNode;
-  chain: ViewNode[];
 }
 
 type SortKey = "name" | "size";
@@ -46,11 +43,11 @@ const state = {
   /** Ids of the expanded list rows. */
   open: new Set<string>(),
   sort: { key: "size" as SortKey, dir: -1 },
-  scanning: null as { drive: string; progress: ScanProgress | null } | null,
   elevated: false,
   message: "",
 };
 
+const scans = new ScanRuns();
 const app = document.getElementById("app")!;
 const scanOf = (d: Drive | null) => (d ? state.scans.get(d.mount) : undefined);
 const focus = () => state.trail[state.trail.length - 1];
@@ -59,15 +56,18 @@ const showing = () => state.trail.length > 0;
 
 /* ---------- Data ---------- */
 
-async function load(kind: "maps" | "nodes", id: string): Promise<ViewNode> {
-  const drive = state.drive!.mount;
-  const cache = state.scans.get(drive)![kind];
+async function load(drive: string, kind: "maps" | "nodes", id: string): Promise<ViewNode> {
+  const scan = state.scans.get(drive);
+  if (!scan) throw `${driveLetter(drive)} has not been scanned yet.`;
+  const cache = scan[kind];
   const cached = cache.get(id);
   if (cached) return cached;
   const node = await invoke<ViewNode>(kind === "maps" ? "get_map" : "get_node", { drive, id });
   cache.set(id, node);
   return node;
 }
+
+const nav = navigator(state, load, (mount) => state.scans.has(mount));
 
 async function refreshDrives() {
   state.drives = await invoke<Drive[]>("list_drives");
@@ -94,12 +94,14 @@ async function run(action: () => Promise<void> | void) {
 
 async function startScan(drive: Drive) {
   state.message = "";
-  state.scanning = { drive: drive.mount, progress: null };
+  const scan = scans.begin(drive.mount);
   render();
   try {
-    await invoke("start_scan", { drive: drive.mount });
+    scans.started(scan, await invoke<number>("start_scan", { drive: drive.mount }));
+    // Ended already, before its id came back.
+    if (!scans.running) render();
   } catch (e) {
-    state.scanning = null;
+    scans.failed(scan);
     notify(String(e));
   }
 }
@@ -123,26 +125,17 @@ async function reveal(path: string) {
 
 /* ---------- Navigation ---------- */
 
+// Navigation goes through `nav`, which applies a move only once it has loaded and only if
+// nothing newer started meanwhile. These redraw after a move that was applied.
+
 async function showDrive(drive: Drive) {
-  state.drive = drive;
-  state.trail = [];
-  state.selected = null;
-  state.open = new Set(["root"]);
+  if (!(await nav.showDrive(drive))) return;
   hideTip();
-  if (scanOf(drive)) {
-    const [map] = await Promise.all([load("maps", "root"), load("nodes", "root")]);
-    if (state.drive.mount === drive.mount) state.trail = [map];
-  }
   render();
 }
 
-/** Points the map at the last folder in `trail`, which is the only one that needs its nested levels. */
-async function goTo(trail: ViewNode[], selected: Located | null) {
-  const last = trail[trail.length - 1];
-  // Keep the name the user clicked on; app locations are labelled by path in their parent.
-  const loaded = { ...(await load("maps", last.id)), name: last.name };
-  state.trail = [...trail.slice(0, -1), loaded];
-  state.selected = selected;
+async function goTo(trail: ViewNode[], selected: Located | null, also?: () => void) {
+  if (!(await nav.goTo(trail, selected, also))) return;
   hideTip();
   render();
 }
@@ -191,22 +184,25 @@ const canGoUp = () => showing() && (state.tab === "map" ? state.trail.length > 1
 
 /** Switches tabs and carries the selection across. */
 async function setTab(tab: "map" | "list") {
-  const sel = state.selected;
-  state.tab = tab;
-  if (sel && showing()) {
-    if (tab === "list") {
-      for (const n of sel.chain) {
-        await load("nodes", n.id);
-        state.open.add(n.id);
-      }
-      revealRow = true;
-    } else if (!sel.chain.length) {
-      state.selected = null;
-    } else if (!sel.chain.some((n) => n.id === focus().id)) {
-      // The selection is outside the folder the map shows, so show the folder that holds it.
-      return goTo(sel.chain, sel);
-    }
+  const sel = showing() ? state.selected : null;
+  const drive = state.drive?.mount;
+  const switchTab = () => (state.tab = tab);
+  if (sel && drive && tab === "map" && sel.chain.length && !sel.chain.some((n) => n.id === focus().id)) {
+    // The selection is outside the folder the map shows, so show the folder that holds it.
+    return goTo(sel.chain, sel, switchTab);
   }
+  const applied = await nav.move(async () => {
+    if (sel && drive && tab === "list") for (const n of sel.chain) await load(drive, "nodes", n.id);
+    return () => {
+      switchTab();
+      if (!sel) return;
+      if (tab === "list") {
+        for (const n of sel.chain) state.open.add(n.id);
+        revealRow = true;
+      } else if (!sel.chain.length) state.selected = null;
+    };
+  });
+  if (!applied) return;
   render();
   // So the arrow keys work in the list straight away.
   if (tab === "list" && showing()) list.focus();
@@ -220,7 +216,7 @@ function button(label: string, onclick: () => void, disabled = false, title?: st
 
 function renderToolbar() {
   const cur = state.drive;
-  const busy = !!state.scanning;
+  const busy = !!scans.running;
   return h(
     "div",
     { class: "toolbar" },
@@ -235,7 +231,8 @@ function renderToolbar() {
     ),
     h("span", { class: "tsep" }),
     cur && button(`${scanOf(cur) ? "Rescan" : "Scan"} ${driveLetter(cur.mount)}`, () => startScan(cur), busy),
-    button("Stop", () => invoke("cancel_scan"), !busy),
+    // Names the run, so a Stop that arrives late cannot cancel a scan started after it.
+    button("Stop", () => run(() => invoke("cancel_scan", { scan: scans.running?.id ?? null })), !busy),
     h("span", { class: "grow" }),
     !state.elevated &&
       h(
@@ -394,8 +391,12 @@ function listRows(): Located[] {
 async function toggleRow(node: ViewNode) {
   if (state.open.has(node.id)) state.open.delete(node.id);
   else if (canOpen(node)) {
-    await load("nodes", node.id);
-    state.open.add(node.id);
+    const drive = state.drive!.mount;
+    const applied = await nav.read(async () => {
+      await load(drive, "nodes", node.id);
+      return () => state.open.add(node.id);
+    });
+    if (!applied) return;
   }
   render();
 }
@@ -548,7 +549,7 @@ function renderSelectionBar() {
 function renderStatus() {
   const bar = h("footer", { class: "status" });
   if (state.message) bar.append(h("span", { class: "err", role: "alert" }, state.message));
-  const busy = state.scanning;
+  const busy = scans.running;
   const s = scanOf(state.drive)?.summary;
   if (busy) {
     bar.append(
@@ -571,7 +572,7 @@ function renderStatus() {
 }
 
 function updateProgress() {
-  const p = state.scanning?.progress;
+  const p = scans.running?.progress;
   const count = document.getElementById("scan-count");
   const path = document.getElementById("scan-path");
   if (!p || !count || !path) return;
@@ -585,7 +586,7 @@ function renderView() {
   if (showing()) return state.tab === "map" ? mapView : list;
   const d = state.drive;
   if (!d) return h("div", { class: "view" }, h("div", { class: "empty" }, "No drives found."));
-  const mine = state.scanning?.drive === d.mount;
+  const mine = scans.running?.drive === d.mount;
   return h(
     "div",
     { class: "view" },
@@ -593,7 +594,7 @@ function renderView() {
       "div",
       { class: "empty" },
       h("span", {}, mine ? `Scanning ${driveLetter(d.mount)}…` : `${driveLetter(d.mount)} has not been scanned.`),
-      !mine && button(`Scan ${driveLetter(d.mount)}`, () => startScan(d), !!state.scanning),
+      !mine && button(`Scan ${driveLetter(d.mount)}`, () => startScan(d), !!scans.running),
     ),
   );
 }
@@ -628,26 +629,27 @@ async function boot() {
   if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) await (await import("./devmock")).install();
 
   await listen<ScanProgress>("scan-progress", (e) => {
-    if (state.scanning?.drive !== e.payload.drive) return;
-    state.scanning.progress = e.payload;
-    updateProgress();
+    if (scans.progress(e.payload)) updateProgress();
   });
 
   await listen<ScanSummary>("scan-done", (e) =>
     run(async () => {
       const s = e.payload;
-      state.scans.set(s.drive, { summary: s, maps: new Map(), nodes: new Map() });
-      if (state.scanning?.drive === s.drive) state.scanning = null;
-      await refreshDrives();
-      // Don't pull the user away from another drive they opened while this one was scanning.
-      if (state.drive?.mount === s.drive) await showDrive(state.drive);
-      else render();
+      scans.end(s.scan);
+      if (isNewer(s, state.scans.get(s.drive)?.summary)) {
+        state.scans.set(s.drive, { summary: s, maps: new Map(), nodes: new Map() });
+        await refreshDrives();
+        // Reload the drive if it is on screen or being opened, which also drops any folder
+        // still loading from the old results. Don't pull the user away from another drive
+        // they opened while this one was scanning.
+        if (nav.destination()?.mount === s.drive) return showDrive(state.drives.find((d) => d.mount === s.drive) ?? nav.destination()!);
+      }
+      render();
     }),
   );
 
-  await listen<string>("scan-cancelled", (e) => {
-    if (state.scanning?.drive === e.payload) state.scanning = null;
-    render();
+  await listen<ScanCancelled>("scan-cancelled", (e) => {
+    if (scans.end(e.payload.scan)) render();
   });
 
   let status: { elevated: boolean; startup_scan: string | null };

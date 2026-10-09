@@ -105,10 +105,18 @@ pub struct Progress {
     pub denied: AtomicU64,
     pub current: Mutex<String>,
     pub cancel: AtomicBool,
+    /// Tests cancel deterministically once this many files have been counted, which is
+    /// how they land a cancellation in the middle of one folder's listing.
+    #[cfg(test)]
+    pub cancel_after_files: Option<u64>,
 }
 
 impl Progress {
     pub fn cancelled(&self) -> bool {
+        #[cfg(test)]
+        if self.cancel_after_files.is_some_and(|n| self.files.load(Relaxed) >= n) {
+            return true;
+        }
         self.cancel.load(Relaxed)
     }
 }
@@ -147,6 +155,11 @@ fn walk(path: &Path, name: String, p: &Progress) -> TmpDir {
     };
     let mut subdirs = Vec::new();
     for entry in entries.flatten() {
+        // Checked per entry, not just per folder: one folder can hold hundreds of
+        // thousands of files, and Stop should not wait for all of them.
+        if p.cancelled() {
+            return out;
+        }
         let Ok(ft) = entry.file_type() else { continue };
         // Junctions and symlinks point at data that is counted where it really lives.
         if ft.is_symlink() {
@@ -292,5 +305,18 @@ mod tests {
         p.cancel.store(true, Relaxed);
         let tree = scan(dir.path(), &p);
         assert_eq!(tree.nodes.len(), 1);
+    }
+
+    /// A cancel that arrives while one large folder is being listed stops that listing,
+    /// rather than waiting for the folder to finish.
+    #[test]
+    fn cancel_stops_inside_a_large_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..200 {
+            write(&dir.path().join(format!("big/{i}.txt")), 1);
+        }
+        let p = Progress { cancel_after_files: Some(5), ..Default::default() };
+        scan(dir.path(), &p);
+        assert_eq!(p.files.load(Relaxed), 5, "the listing stops at the next entry once cancelled");
     }
 }

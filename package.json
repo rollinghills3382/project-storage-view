@@ -10,7 +10,7 @@
     "tauri": "tauri",
     "test": "npm run test:rust && npm run test:ui",
     "test:rust": "cd src-tauri && cargo test",
-    "test:ui": "node --test tests/ui.test.ts"
+    "test:ui": "node --test tests/ui.test.ts tests/nav.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
