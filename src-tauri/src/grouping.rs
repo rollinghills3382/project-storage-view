@@ -94,6 +94,16 @@ pub struct ViewNode {
     pub locations: Vec<Location>,
     pub has_children: bool,
     pub children: Option<Vec<ViewNode>>,
+    /// Drive only: every scanned byte by category, worked out before any "smaller items"
+    /// tile bundles the tail, so it does not depend on what fits on screen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Vec<CategoryTotal>>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CategoryTotal {
+    pub category: Category,
+    pub size: u64,
 }
 
 struct Candidate {
@@ -258,13 +268,35 @@ impl View {
         out
     }
 
+    /// Bytes per category over everything at the top of the drive, largest first. Every
+    /// scanned byte sits in exactly one top-level item, so these add up to the drive's
+    /// scanned size whatever the display limits cut off.
+    pub fn category_totals(&self) -> Vec<CategoryTotal> {
+        let mut totals: Vec<CategoryTotal> = Vec::new();
+        for child in self.children(Id::Root) {
+            let size = self.size(child.clone());
+            let category = self.category(child).unwrap_or(Category::Other);
+            match totals.iter_mut().find(|t| t.category == category) {
+                Some(t) => t.size += size,
+                None => totals.push(CategoryTotal { category, size }),
+            }
+        }
+        totals.sort_by_key(|t| std::cmp::Reverse(t.size));
+        totals
+    }
+
     fn category(&self, id: Id) -> Option<Category> {
         let mut cur = match id {
             Id::Root => return None,
             Id::Group(g) => return Some(self.groups[g as usize].category),
-            // A "smaller items" tile is part of whatever it hangs off, so it takes that
-            // category; for a folder that is the folder's own.
-            Id::Tail(inner, _) => return self.category(*inner),
+            // A "smaller items" tile takes the category its contents share. Inside a folder
+            // or an app that is always the parent's own; at the top of the drive the tail
+            // mixes apps and folders, so it only has one when they all agree.
+            Id::Tail(inner, offset) => {
+                let mut cats = self.children(*inner.clone()).into_iter().skip(offset).map(|c| self.category(c));
+                let first = cats.next().flatten();
+                return if cats.all(|c| c == first) { first } else { self.category(*inner) };
+            }
             Id::Node(n) => n,
         };
         loop {
@@ -316,7 +348,8 @@ impl View {
             }
         };
         let key = id.key();
-        ViewNode { id: key, name, size: self.size(id.clone()), kind, category: self.category(id), path, locations, has_children, children: None }
+        let categories = matches!(id, Id::Root).then(|| self.category_totals());
+        ViewNode { id: key, name, size: self.size(id.clone()), kind, category: self.category(id), path, locations, has_children, children: None, categories }
     }
 
     /// The node plus `depth` levels of children, largest first. Long tails are bundled into one "more" entry.
@@ -346,17 +379,19 @@ impl View {
             }
         }
         if kids.len() > limit {
+            let tail = Id::Tail(Box::new(id.clone()), limit);
             out.push(ViewNode {
-                id: Id::Tail(Box::new(id.clone()), limit).key(),
+                id: tail.key(),
                 name: format!("{} smaller items", kids.len() - limit),
                 size: kids[limit..].iter().map(|k| self.size(k.clone())).sum(),
                 kind: "more",
-                category: v.category,
+                category: self.category(tail),
                 path: None,
                 locations: Vec::new(),
                 // Opening the tile lists what is in here, rather than leaving it a dead end.
                 has_children: true,
                 children: None,
+                categories: None,
             });
         }
         v.children = Some(out);
@@ -627,5 +662,155 @@ mod tests {
             assert!(hops <= 3, "should bottom out rather than loop forever");
         }
         assert_eq!(hops, 2, "65 items under one limit of {LIMIT_TOP} needs two hops");
+    }
+
+    /// One game per folder under a Steam library, `mb[i]` megabytes each.
+    fn games(r: &Path, mb: &[u64]) -> Vec<InstalledApp> {
+        mb.iter()
+            .enumerate()
+            .map(|(i, &size)| {
+                let rel = format!("Games/Steam/steamapps/common/Game{i:03}");
+                write(r, &format!("{rel}/game.bin"), size);
+                app(r, &format!("Game {i:03}"), "", &rel, true)
+            })
+            .collect()
+    }
+
+    fn totals(v: &View) -> Vec<(Category, u64)> {
+        let node = v.view(Id::Root, 1);
+        let from_node: Vec<(Category, u64)> = node.categories.expect("the drive carries its totals").into_iter().map(|t| (t.category, t.size)).collect();
+        let direct: Vec<(Category, u64)> = v.category_totals().into_iter().map(|t| (t.category, t.size)).collect();
+        assert_eq!(from_node, direct);
+        assert_eq!(from_node.iter().map(|t| t.1).sum::<u64>(), node.size, "totals add up to the scanned size, nothing twice");
+        from_node
+    }
+
+    /// Issue #7: 61 games used to leave the last one in an uncategorised tile, which the
+    /// usage bar counted as Other.
+    #[test]
+    fn a_drive_of_games_is_all_games_past_the_display_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let sizes: Vec<u64> = (1..=LIMIT_TOP as u64 + 1).collect();
+        let apps = games(r, &sizes);
+        let v = View::build(scan(r, &Progress::default()), &apps);
+
+        let root = v.view(Id::Root, 1);
+        let kids = root.children.as_ref().unwrap();
+        assert_eq!(kids.len(), LIMIT_TOP + 1);
+        let more = kids.last().unwrap();
+        assert_eq!((more.kind, more.size), ("more", MB), "the smallest game is in the tile");
+        assert_eq!(more.category, Some(Category::Games), "a tail of games is drawn as games");
+
+        assert_eq!(totals(&v), vec![(Category::Games, root.size)]);
+        assert!(kids.iter().all(|k| k.category == Some(Category::Games)));
+    }
+
+    /// Issue #7: a tail mixing categories counts each one exactly, and the tile itself
+    /// claims none rather than picking one.
+    #[test]
+    fn a_mixed_tail_is_counted_per_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        // 60 large games fill the visible slots; two small games, Windows and a user folder
+        // fall into the tail.
+        let mut sizes = vec![3; LIMIT_TOP];
+        sizes.extend([2, 2]);
+        let apps = games(r, &sizes);
+        write(r, "Windows/sys.bin", 2);
+        write(r, "Users/me/doc.bin", 1);
+        let v = View::build(scan(r, &Progress::default()), &apps);
+
+        let root = v.view(Id::Root, 1);
+        let more = root.children.as_ref().unwrap().iter().find(|c| c.kind == "more").expect("a tail");
+        assert_eq!(more.name, "4 smaller items");
+        assert_eq!(more.size, 7 * MB);
+        assert_eq!(more.category, None, "games, system and user files share no category");
+
+        assert_eq!(totals(&v), vec![(Category::Games, (3 * LIMIT_TOP as u64 + 4) * MB), (Category::System, 2 * MB), (Category::User, MB)]);
+    }
+
+    /// Issue #6 and #7: every level and every tile adds up, just under, at and just over
+    /// both the top-level and the preview limits.
+    #[test]
+    fn sizes_reconcile_around_both_limits() {
+        for count in [LIMIT_PREVIEW - 1, LIMIT_PREVIEW, LIMIT_PREVIEW + 1, LIMIT_TOP - 1, LIMIT_TOP, LIMIT_TOP + 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let r = dir.path();
+            for i in 0..count {
+                write(r, &format!("top{i:03}/f.bin"), 1 + (i % 5) as u64);
+                write(r, &format!("Users/me/inner{i:03}.bin"), 1 + (i % 3) as u64);
+            }
+            let v = View::build(scan(r, &Progress::default()), &[]);
+            let users = v.tree.find(&r.join("Users")).unwrap();
+            let me = v.tree.find(&r.join("Users/me")).unwrap();
+
+            totals(&v);
+            for id in [Id::Root, Id::Node(users), Id::Node(me)] {
+                assert_children_sum(&v, id);
+            }
+
+            let root = v.map(Id::Root);
+            let kids = root.children.as_ref().unwrap();
+            assert_eq!(kids.iter().map(|c| c.size).sum::<u64>(), root.size, "{count}: top level");
+            assert_eq!(kids.iter().any(|c| c.kind == "more"), count + 1 > LIMIT_TOP, "{count}: Users plus {count} folders");
+
+            // `me` is two levels down, so the map shows it with the preview limit.
+            let users_tile = kids.iter().find(|c| c.name == "Users").unwrap();
+            let me_tile = &users_tile.children.as_ref().unwrap()[0];
+            let me_kids = me_tile.children.as_ref().unwrap();
+            assert_eq!(me_kids.iter().map(|c| c.size).sum::<u64>(), me_tile.size, "{count}: preview level");
+            let more = me_kids.iter().find(|c| c.kind == "more");
+            assert_eq!(more.is_some(), count > LIMIT_PREVIEW, "{count}: preview tail");
+            if let Some(more) = more {
+                let opened = v.view(Id::parse(&more.id).unwrap(), 1);
+                let listed = opened.children.unwrap();
+                assert_eq!(listed.len(), count - LIMIT_PREVIEW);
+                assert_eq!(listed.iter().map(|c| c.size).sum::<u64>(), more.size, "{count}: opened preview tail");
+            }
+        }
+    }
+
+    /// Issue #6: everything the scan kept can be reached by opening tiles from the drive
+    /// down, and what is found there keeps its name, size and path.
+    #[test]
+    fn every_item_is_reachable_through_the_tiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let apps = games(r, &(1..=70).map(|i| 1 + i % 4).collect::<Vec<_>>());
+        for i in 0..LIMIT_TOP + 15 {
+            write(r, &format!("d{i:03}/big.bin"), 2);
+        }
+        for i in 0..LIMIT_TOP * 2 + 3 {
+            write(r, &format!("Users/me/Downloads/file{i:03}.bin"), 1 + (i % 7) as u64);
+        }
+        fs::write(r.join("Users/me/Downloads/tiny.txt"), b"under the small-file limit").unwrap();
+        let v = View::build(scan(r, &Progress::default()), &apps);
+
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = vec![Id::Root];
+        while let Some(id) = queue.pop() {
+            for child in v.view(id, 1).children.into_iter().flatten() {
+                let parsed = Id::parse(&child.id).expect("every id the UI gets back parses");
+                if let Id::Node(n) = parsed {
+                    assert!(seen.insert(n), "{} listed twice", child.name);
+                    let node = v.tree.node(n);
+                    assert_eq!(child.size, v.eff[n as usize]);
+                    if !matches!(node.kind, NodeKind::SmallFiles { .. }) {
+                        assert_eq!(child.name, node.name.to_string());
+                        assert_eq!(child.path.as_deref(), Some(v.tree.path(n).display().to_string().as_str()), "Show in File Explorer needs the path");
+                    }
+                }
+                if child.has_children {
+                    queue.push(parsed);
+                }
+            }
+        }
+        // A folder an app claimed on its own is shown as the app, so it is the app that gets
+        // listed, not the folder; what is inside it still has to turn up.
+        let shown = |n: u32| v.eff[n as usize] > 0 && (v.tree.node(n).kind != NodeKind::Dir || v.owner[n as usize] == UNOWNED);
+        let expected: std::collections::HashSet<u32> = (1..v.tree.nodes.len() as u32).filter(|&n| shown(n)).collect();
+        let missing: Vec<String> = expected.difference(&seen).map(|&n| v.tree.path(n).display().to_string()).collect();
+        assert!(missing.is_empty(), "unreachable: {missing:?}");
     }
 }

@@ -31,6 +31,9 @@ export interface ViewNode {
   locations: { path: string; size: number }[];
   has_children: boolean;
   children: ViewNode[] | null;
+  /** Drive only: every scanned byte by category, largest first, counted before the
+   * display limits bundle anything into a "smaller items" tile. */
+  categories?: { category: Category; size: number }[];
 }
 
 /** Why a path could not be read. Only `denied` is something administrator rights can fix. */

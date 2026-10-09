@@ -15,7 +15,6 @@ import {
   kindLabel,
   pct,
   scanNotes,
-  type Category,
   type Drive,
   type ScanCancelled,
   type ScanProgress,
@@ -507,13 +506,10 @@ function renderLegend() {
   const root = scanOf(d)?.maps.get("root");
   const row = h("div", { class: "legend" });
   if (!d || !root || !showing()) return row;
-  const totals = new Map<Category, number>();
-  for (const c of root.children ?? []) {
-    const cat = c.category ?? "other";
-    totals.set(cat, (totals.get(cat) ?? 0) + c.size);
-  }
   const item = (label: string, bytes: number, color: string, title?: string) => h("span", { title }, h("i", { class: "sw", style: `background:${color}` }), h("b", {}, label), fmtBytes(bytes));
-  for (const [cat, bytes] of [...totals].sort((a, b) => b[1] - a[1])) row.append(item(CATEGORIES[cat], bytes, catColor(cat)));
+  // The backend counts these over the whole drive. Adding up the map's tiles instead would
+  // count a "smaller items" tile as Other whatever it holds.
+  for (const { category, size } of root.categories ?? []) row.append(item(CATEGORIES[category], size, catColor(category)));
   const unaccounted = d.total - d.free - root.size;
   if (unaccounted > d.total * 0.005) {
     row.append(item("Not readable", unaccounted, "var(--muted)", "Folders Windows wouldn't let Storage View read, plus space the file system reserves."));
