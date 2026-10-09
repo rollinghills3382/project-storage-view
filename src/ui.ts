@@ -43,6 +43,8 @@ export interface ScanErrors {
 }
 
 export interface ScanSummary {
+  /** The run that produced these results. Scan events all carry one. */
+  scan: number;
   drive: string;
   files: number;
   dirs: number;
@@ -87,11 +89,17 @@ export function scanNotes(errors: ScanErrors | undefined, elevated: boolean): Sc
 }
 
 export interface ScanProgress {
+  scan: number;
   drive: string;
   files: number;
   dirs: number;
   bytes: number;
   current: string;
+}
+
+export interface ScanCancelled {
+  scan: number;
+  drive: string;
 }
 
 export const catColor = (c: Category | null) => `var(--c-${c ?? "other"})`;

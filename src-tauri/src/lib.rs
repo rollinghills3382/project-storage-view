@@ -7,46 +7,102 @@ pub mod scan;
 use grouping::{Id, View, ViewNode};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
+
+/// One scan, from `start_scan` until it publishes, is cancelled or is replaced.
+struct Run {
+    /// Sent with every event the scan emits, so the UI can tell this run from an
+    /// earlier scan of the same drive whose events are still arriving.
+    id: u64,
+    progress: scan::Progress,
+}
+
+/// How a scan ended, which decides what it may tell the UI.
+#[derive(Debug, PartialEq)]
+enum Outcome {
+    /// Its view is stored and it reports `scan-done`.
+    Published,
+    /// It was cancelled before it could publish. It stored nothing and reports `scan-cancelled`.
+    Cancelled,
+    /// A newer scan replaced it. It stored nothing and reports nothing, so it cannot
+    /// overwrite fresher data or reset the progress of the scan the user is watching.
+    Superseded,
+}
 
 #[derive(Default)]
 struct AppState {
     /// Finished scans, keyed by drive root (`C:\`).
     views: Mutex<HashMap<String, Arc<View>>>,
-    running: Mutex<Option<Arc<scan::Progress>>>,
+    running: Mutex<Option<Arc<Run>>>,
+    last_id: AtomicU64,
 }
 
 impl AppState {
-    /// Claims the result slot for `progress` and clears it.
-    ///
-    /// False means a newer scan took over while this one was running, so this scan is
-    /// superseded: it must not store its tree or report anything to the UI, otherwise it
-    /// would overwrite fresher data and reset the progress of the scan the user is watching.
-    fn retire(&self, progress: &Arc<scan::Progress>) -> bool {
-        let mut running = self.running.lock().unwrap();
-        if running.as_ref().is_some_and(|p| Arc::ptr_eq(p, progress)) {
-            *running = None;
-            true
-        } else {
-            false
+    /// Makes a new scan the running one and cancels whichever it replaces.
+    fn begin(&self) -> Arc<Run> {
+        let run = Arc::new(Run { id: self.last_id.fetch_add(1, Relaxed) + 1, progress: scan::Progress::default() });
+        if let Some(old) = self.running.lock().unwrap().replace(run.clone()) {
+            old.progress.cancel.store(true, Relaxed);
+        }
+        run
+    }
+
+    /// Asks the running scan to stop, if it is `scan` (or any scan, for `None`). The slot
+    /// stays taken until it actually stops, so a scan started right afterwards is not
+    /// mistaken for the cancelled one.
+    fn cancel(&self, scan: Option<u64>) {
+        if let Some(run) = self.running.lock().unwrap().as_ref().filter(|r| scan.is_none_or(|id| id == r.id)) {
+            run.progress.cancel.store(true, Relaxed);
         }
     }
 
-    /// Asks the running scan to stop. The slot stays taken until it actually stops, so a
-    /// scan started right afterwards is not mistaken for the cancelled one.
-    fn cancel(&self) {
-        if let Some(p) = self.running.lock().unwrap().as_ref() {
-            p.cancel.store(true, Relaxed);
+    /// Ends `run`, storing `view` only if `run` is still the running scan and was not
+    /// cancelled. Both are checked under the lock `cancel` takes, so a cancel either lands
+    /// before this and wins, or finds the slot already empty.
+    fn publish(&self, run: &Arc<Run>, drive: &str, view: Option<View>) -> Outcome {
+        let mut running = self.running.lock().unwrap();
+        if !running.as_ref().is_some_and(|r| Arc::ptr_eq(r, run)) {
+            return Outcome::Superseded;
         }
+        *running = None;
+        match view {
+            Some(view) if !run.progress.cancelled() => {
+                self.views.lock().unwrap().insert(drive.to_string(), Arc::new(view));
+                Outcome::Published
+            }
+            _ => Outcome::Cancelled,
+        }
+    }
+
+    /// Scans `root`, groups it by app and publishes the result. Cancellation is checked
+    /// again after each slow step, so a Stop pressed while apps are being detected or the
+    /// tree is being grouped still ends the run without results.
+    fn complete(&self, run: &Arc<Run>, root: &Path, drive: &str, detect_apps: impl FnOnce() -> Vec<apps::InstalledApp>) -> (Outcome, u64) {
+        let p = &run.progress;
+        let tree = scan::scan(root, p);
+        let view = (|| {
+            if p.cancelled() {
+                return None;
+            }
+            let apps = detect_apps();
+            if p.cancelled() {
+                return None;
+            }
+            let view = View::build(tree, &apps);
+            (!p.cancelled()).then_some(view)
+        })();
+        let files = view.as_ref().map_or(0, |v| v.tree.file_count());
+        (self.publish(run, drive, view), files)
     }
 }
 
 #[derive(Clone, Serialize)]
 struct ProgressEvent {
+    scan: u64,
     drive: String,
     files: u64,
     dirs: u64,
@@ -56,12 +112,19 @@ struct ProgressEvent {
 
 #[derive(Clone, Serialize)]
 struct ScanSummary {
+    scan: u64,
     drive: String,
     files: u64,
     dirs: u64,
     /// Paths that could not be read, by cause, with a few examples of each.
     errors: scan::ErrorReport,
     elapsed_ms: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct ScanCancelled {
+    scan: u64,
+    drive: String,
 }
 
 #[derive(Serialize)]
@@ -99,16 +162,15 @@ fn list_drives() -> Vec<drives::DriveInfo> {
     drives::list()
 }
 
+/// Starts scanning `drive` and returns the id its events will carry.
 #[tauri::command]
-fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<(), String> {
+fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<u64, String> {
     let root = PathBuf::from(&drive);
     if !root.is_dir() {
         return Err(format!("{drive} is not available."));
     }
-    let progress = Arc::new(scan::Progress::default());
-    if let Some(old) = state.running.lock().unwrap().replace(progress.clone()) {
-        old.cancel.store(true, Relaxed);
-    }
+    let run = state.begin();
+    let scan = run.id;
 
     std::thread::Builder::new()
         .name("scan".into())
@@ -117,17 +179,19 @@ fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<(
             let started = Instant::now();
             let finished = Arc::new(AtomicBool::new(false));
             let ticker = {
-                let (app, progress, finished, drive) = (app.clone(), progress.clone(), finished.clone(), drive.clone());
+                let (app, run, finished, drive) = (app.clone(), run.clone(), finished.clone(), drive.clone());
                 std::thread::spawn(move || {
+                    let p = &run.progress;
                     while !finished.load(Relaxed) {
                         let _ = app.emit(
                             "scan-progress",
                             ProgressEvent {
+                                scan: run.id,
                                 drive: drive.clone(),
-                                files: progress.files.load(Relaxed),
-                                dirs: progress.dirs.load(Relaxed),
-                                bytes: progress.bytes.load(Relaxed),
-                                current: progress.current.lock().map(|c| c.clone()).unwrap_or_default(),
+                                files: p.files.load(Relaxed),
+                                dirs: p.dirs.load(Relaxed),
+                                bytes: p.bytes.load(Relaxed),
+                                current: p.current.lock().map(|c| c.clone()).unwrap_or_default(),
                             },
                         );
                         std::thread::sleep(Duration::from_millis(120));
@@ -135,38 +199,39 @@ fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<(
                 })
             };
 
-            let tree = scan::scan(&root, &progress);
-            let view = (!progress.cancelled()).then(|| View::build(tree, &apps::installed_apps()));
+            let state = app.state::<AppState>();
+            let (outcome, files) = state.complete(&run, &root, &drive, apps::installed_apps);
+            // Progress stops before the outcome is reported, so no progress event for this
+            // run can arrive after it.
             finished.store(true, Relaxed);
             let _ = ticker.join();
 
-            let state = app.state::<AppState>();
-            // A scan that was replaced while walking is dropped whole, so the UI never sees
-            // stale results or a stray "cancelled" for a scan the user never cancelled.
-            if !state.retire(&progress) {
-                return;
+            match outcome {
+                Outcome::Published => {
+                    let summary = ScanSummary {
+                        scan: run.id,
+                        drive,
+                        files,
+                        dirs: run.progress.dirs.load(Relaxed),
+                        errors: run.progress.errors.report(),
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                    };
+                    let _ = app.emit("scan-done", summary);
+                }
+                Outcome::Cancelled => {
+                    let _ = app.emit("scan-cancelled", ScanCancelled { scan: run.id, drive });
+                }
+                Outcome::Superseded => {}
             }
-            let Some(view) = view else {
-                let _ = app.emit("scan-cancelled", &drive);
-                return;
-            };
-            let summary = ScanSummary {
-                drive: drive.clone(),
-                files: view.tree.file_count(),
-                dirs: progress.dirs.load(Relaxed),
-                errors: progress.errors.report(),
-                elapsed_ms: started.elapsed().as_millis() as u64,
-            };
-            state.views.lock().unwrap().insert(drive, Arc::new(view));
-            let _ = app.emit("scan-done", summary);
         })
         .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(scan)
 }
 
+/// Stops scan `scan`, or whichever scan is running when no id is given.
 #[tauri::command]
-fn cancel_scan(state: State<AppState>) {
-    state.cancel();
+fn cancel_scan(state: State<AppState>, scan: Option<u64>) {
+    state.cancel(scan);
 }
 
 fn lookup(state: &State<AppState>, drive: &str, id: &str) -> Result<(Arc<View>, Id), String> {
@@ -203,47 +268,145 @@ pub fn run() {
 mod tests {
     use super::*;
 
-    fn slot(state: &AppState) -> Option<Arc<scan::Progress>> {
-        state.running.lock().unwrap().clone()
+    fn slot(state: &AppState) -> Option<u64> {
+        state.running.lock().unwrap().as_ref().map(|r| r.id)
     }
 
-    /// A scan that a newer one replaced must report nothing, so it cannot reset the
-    /// progress of the scan the user is actually watching.
-    #[test]
-    fn superseded_scans_report_nothing() {
-        let state = AppState::default();
-        let first = Arc::new(scan::Progress::default());
-        *state.running.lock().unwrap() = Some(first.clone());
-        let second = Arc::new(scan::Progress::default());
-        state.running.lock().unwrap().replace(second.clone());
+    fn drive_with_a_file() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file.bin"), [0u8; 10]).unwrap();
+        dir
+    }
 
-        assert!(!state.retire(&first), "the replaced scan must not claim the result");
-        assert!(slot(&state).is_some(), "the newer scan still owns the slot");
-        assert!(state.retire(&second));
-        assert!(slot(&state).is_none());
+    fn stored(state: &AppState, drive: &str) -> Option<Arc<View>> {
+        state.views.lock().unwrap().get(drive).cloned()
+    }
+
+    #[test]
+    fn each_scan_gets_a_new_id() {
+        let state = AppState::default();
+        let a = state.begin();
+        let b = state.begin();
+        assert!(b.id > a.id);
+        assert!(a.progress.cancelled(), "starting a scan cancels the one it replaces");
+        assert_eq!(slot(&state), Some(b.id));
+    }
+
+    #[test]
+    fn a_finished_scan_publishes_its_view() {
+        let dir = drive_with_a_file();
+        let state = AppState::default();
+        let run = state.begin();
+        let (outcome, files) = state.complete(&run, dir.path(), "C:\\", Vec::new);
+        assert_eq!(outcome, Outcome::Published);
+        assert_eq!(files, 1);
+        assert!(stored(&state, "C:\\").is_some());
+        assert_eq!(slot(&state), None);
+    }
+
+    /// Stop pressed during traversal: the run ends without results and the previous scan
+    /// of the drive stays on screen.
+    #[test]
+    fn cancel_during_traversal_publishes_nothing() {
+        let dir = drive_with_a_file();
+        let state = AppState::default();
+        let first = state.begin();
+        assert_eq!(state.complete(&first, dir.path(), "C:\\", Vec::new).0, Outcome::Published);
+        let before = stored(&state, "C:\\").unwrap();
+
+        let run = state.begin();
+        state.cancel(Some(run.id));
+        let (outcome, _) = state.complete(&run, dir.path(), "C:\\", || panic!("a cancelled scan must not go on to detect apps"));
+        assert_eq!(outcome, Outcome::Cancelled);
+        assert!(Arc::ptr_eq(&stored(&state, "C:\\").unwrap(), &before), "the earlier view is kept");
+    }
+
+    /// Stop pressed while installed apps are being read or the tree grouped. This used to
+    /// publish the view and report a successful scan anyway.
+    #[test]
+    fn cancel_during_grouping_publishes_nothing() {
+        let dir = drive_with_a_file();
+        let state = AppState::default();
+        let run = state.begin();
+        let (outcome, _) = state.complete(&run, dir.path(), "C:\\", || {
+            state.cancel(None);
+            Vec::new()
+        });
+        assert_eq!(outcome, Outcome::Cancelled);
+        assert!(stored(&state, "C:\\").is_none());
+        assert_eq!(slot(&state), None, "the cancelled run frees the slot");
+    }
+
+    /// A cancel that lands after grouping but before the view is stored still wins.
+    #[test]
+    fn cancel_just_before_publishing_wins() {
+        let dir = drive_with_a_file();
+        let state = AppState::default();
+        let run = state.begin();
+        let view = View::build(scan::scan(dir.path(), &run.progress), &[]);
+        state.cancel(Some(run.id));
+        assert_eq!(state.publish(&run, "C:\\", Some(view)), Outcome::Cancelled);
+        assert!(stored(&state, "C:\\").is_none());
+    }
+
+    /// Rescanning the same drive: the older run, finishing late, must neither replace the
+    /// newer scan's view nor report anything that would end the newer scan in the UI.
+    #[test]
+    fn a_superseded_same_drive_scan_cannot_overwrite_the_newer_one() {
+        let dir = drive_with_a_file();
+        let state = AppState::default();
+        let old = state.begin();
+        let new = state.begin();
+
+        assert_eq!(state.complete(&new, dir.path(), "C:\\", Vec::new).0, Outcome::Published);
+        let newer = stored(&state, "C:\\").unwrap();
+        assert_eq!(state.complete(&old, dir.path(), "C:\\", Vec::new).0, Outcome::Superseded);
+        assert!(Arc::ptr_eq(&stored(&state, "C:\\").unwrap(), &newer));
+    }
+
+    /// The old run can also finish while the new one is still going; that must leave the
+    /// new run in place.
+    #[test]
+    fn a_superseded_scan_leaves_the_running_one_alone() {
+        let dir = drive_with_a_file();
+        let state = AppState::default();
+        let old = state.begin();
+        let new = state.begin();
+        assert_eq!(state.complete(&old, dir.path(), "C:\\", Vec::new).0, Outcome::Superseded);
+        assert_eq!(slot(&state), Some(new.id));
+        assert!(!new.progress.cancelled());
+    }
+
+    /// Stop for a run that already ended must not cancel the run that replaced it.
+    #[test]
+    fn cancel_names_the_run_it_stops() {
+        let state = AppState::default();
+        let old = state.begin();
+        let new = state.begin();
+        state.cancel(Some(old.id));
+        assert!(!new.progress.cancelled());
+        state.cancel(Some(new.id));
+        assert!(new.progress.cancelled());
     }
 
     /// Cancelling then restarting must not let the old scan's "cancelled" land on the new one.
     #[test]
     fn cancelling_keeps_the_slot_so_a_restart_is_not_confused() {
         let state = AppState::default();
-        let cancelled = Arc::new(scan::Progress::default());
-        *state.running.lock().unwrap() = Some(cancelled.clone());
+        let cancelled = state.begin();
+        state.cancel(None);
+        assert_eq!(slot(&state), Some(cancelled.id), "the slot is held until the scan stops");
+        assert_eq!(state.publish(&cancelled, "C:\\", None), Outcome::Cancelled);
 
-        state.cancel();
-        assert!(cancelled.cancelled());
-        assert!(state.retire(&cancelled), "the cancelled scan still reports that it stopped");
-
-        let restarted = Arc::new(scan::Progress::default());
-        *state.running.lock().unwrap() = Some(restarted.clone());
-        assert!(state.retire(&restarted));
-        assert!(!restarted.cancelled());
+        let restarted = state.begin();
+        assert!(!restarted.progress.cancelled());
+        assert_ne!(restarted.id, cancelled.id);
     }
 
     #[test]
     fn cancelling_without_a_scan_does_nothing() {
         let state = AppState::default();
-        state.cancel();
-        assert!(slot(&state).is_none());
+        state.cancel(None);
+        assert_eq!(slot(&state), None);
     }
 }
