@@ -344,7 +344,7 @@ impl View {
             // a page, which is not worth threading the answer through to avoid.
             Id::Tail(inner, offset) => {
                 let left = self.children(*inner).len().saturating_sub(offset);
-                (format!("{left} smaller items"), "more", None, Vec::new(), left > 0)
+                (smaller_items(left), "more", None, Vec::new(), left > 0)
             }
         };
         let key = id.key();
@@ -382,7 +382,7 @@ impl View {
             let tail = Id::Tail(Box::new(id.clone()), limit);
             out.push(ViewNode {
                 id: tail.key(),
-                name: format!("{} smaller items", kids.len() - limit),
+                name: smaller_items(kids.len() - limit),
                 size: kids[limit..].iter().map(|k| self.size(k.clone())).sum(),
                 kind: "more",
                 category: self.category(tail),
@@ -397,6 +397,11 @@ impl View {
         v.children = Some(out);
         v
     }
+}
+
+/// Label of a "smaller items" tile holding `n` items.
+fn smaller_items(n: usize) -> String {
+    if n == 1 { "1 smaller item".into() } else { format!("{n} smaller items") }
 }
 
 /// `C:\Users\me\AppData\Local\Docker` -> `AppData\Local\Docker`, `C:\Program Files\Docker` -> `Program Files\Docker`.
@@ -700,6 +705,8 @@ mod tests {
         assert_eq!(kids.len(), LIMIT_TOP + 1);
         let more = kids.last().unwrap();
         assert_eq!((more.kind, more.size), ("more", MB), "the smallest game is in the tile");
+        assert_eq!(more.name, "1 smaller item");
+        assert_eq!(v.view(Id::parse(&more.id).unwrap(), 1).name, "1 smaller item", "and the same once opened");
         assert_eq!(more.category, Some(Category::Games), "a tail of games is drawn as games");
 
         assert_eq!(totals(&v), vec![(Category::Games, root.size)]);

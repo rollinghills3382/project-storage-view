@@ -456,7 +456,10 @@ fn flatten(tmp: TmpDir, parent: u32, nodes: &mut Vec<Node>) -> u32 {
         children.push(push_leaf(nodes, id, name, size, NodeKind::File));
     }
     if tmp.small_count > 0 {
-        let name = format!("{} small files", tmp.small_count);
+        let name = match tmp.small_count {
+            1 => "1 small file".to_string(),
+            n => format!("{n} small files"),
+        };
         children.push(push_leaf(nodes, id, name, tmp.small_size, NodeKind::SmallFiles { count: tmp.small_count }));
     }
     children.sort_by(|&a, &b| nodes[b as usize].size.cmp(&nodes[a as usize].size));
@@ -487,11 +490,12 @@ mod tests {
         write(&r.join("a/one.txt"), 10);
         write(&r.join("a/two.txt"), 20);
         write(&r.join("a/b/large.bin"), 2 * SMALL_FILE_LIMIT as usize);
+        write(&r.join("c/only.txt"), 5);
 
         let tree = scan(r, &Progress::default());
         let root = tree.node(Tree::ROOT);
-        assert_eq!(root.size, 5 * SMALL_FILE_LIMIT + 30);
-        assert_eq!(tree.file_count(), 4);
+        assert_eq!(root.size, 5 * SMALL_FILE_LIMIT + 35);
+        assert_eq!(tree.file_count(), 5);
 
         // Largest child first.
         assert_eq!(&*tree.node(root.children[0]).name, "big.bin");
@@ -500,6 +504,11 @@ mod tests {
         let small = tree.node(a).children.iter().map(|&c| tree.node(c)).find(|n| matches!(n.kind, NodeKind::SmallFiles { .. })).unwrap();
         assert_eq!(small.kind, NodeKind::SmallFiles { count: 2 });
         assert_eq!(small.size, 30);
+        assert_eq!(&*small.name, "2 small files");
+
+        let c = tree.find(&r.join("c")).unwrap();
+        let one = tree.node(tree.node(c).children[0]);
+        assert_eq!((one.kind, &*one.name), (NodeKind::SmallFiles { count: 1 }, "1 small file"));
 
         let large = tree.find(&r.join("a").join("b").join("large.bin")).unwrap();
         assert_eq!(tree.path(large), r.join("a").join("b").join("large.bin"));
