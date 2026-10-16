@@ -15,6 +15,7 @@ import {
   kindLabel,
   pct,
   scanNotes,
+  usedGap,
   type Drive,
   type ScanCancelled,
   type ScanProgress,
@@ -506,15 +507,16 @@ function renderLegend() {
   const root = scanOf(d)?.maps.get("root");
   const row = h("div", { class: "legend" });
   if (!d || !root || !showing()) return row;
-  const item = (label: string, bytes: number, color: string, title?: string) => h("span", { title }, h("i", { class: "sw", style: `background:${color}` }), h("b", {}, label), fmtBytes(bytes));
+  const item = (label: string, bytes: number, color: string | null, title?: string) =>
+    h("span", { title, tabindex: title ? 0 : null }, color && h("i", { class: "sw", style: `background:${color}` }), h("b", {}, label), fmtBytes(bytes));
   // The backend counts these over the whole drive. Adding up the map's tiles instead would
   // count a "smaller items" tile as Other whatever it holds.
   for (const { category, size } of root.categories ?? []) row.append(item(CATEGORIES[category], size, catColor(category)));
-  const unaccounted = d.total - d.free - root.size;
-  if (unaccounted > d.total * 0.005) {
-    row.append(item("Not readable", unaccounted, "var(--muted)", "Folders Windows wouldn't let Storage View read, plus space the file system reserves."));
-  }
+  const gap = usedGap(d, root.size, scanOf(d)?.summary.errors);
+  if (gap?.swatch) row.append(item(gap.label, gap.bytes, "var(--muted)", gap.detail));
   row.append(item("Free", d.free, "var(--track)"));
+  // An overcount is not an area of the drive, so it follows the drive's parts instead of joining them.
+  if (gap && !gap.swatch) row.append(item(gap.label, gap.bytes, null, gap.detail));
   return row;
 }
 

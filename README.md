@@ -62,7 +62,8 @@ with `npm run dev` (see `src/devmock.ts`). `devdata/` is gitignored.
 - Sizes are file lengths, not allocated clusters, so compressed and sparse files count at
   full size.
 - Hard links (common in `C:\Windows\WinSxS`) are counted once per link, so `Windows` can read
-  higher than its real footprint.
+  higher than its real footprint. When that makes the scan add up to more than Windows reports
+  as used, the legend says by how much instead of showing unreadable space.
 - Without administrator rights some folders can't be read. The status bar shows how many and
   the toolbar offers **Restart as administrator**. A few folders (such as `System Volume
   Information`) stay unreadable even then.

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { canOpen } from "../src/treemap.ts";
-import { CATEGORIES, catColor, fmtBytes, fmtCount, pct, scanNotes, type ScanErrors, type ScanProblem, type ViewNode } from "../src/ui.ts";
+import { CATEGORIES, catColor, fmtBytes, fmtCount, pct, scanNotes, usedGap, type ScanErrors, type ScanProblem, type ViewNode } from "../src/ui.ts";
 
 test("fmtBytes uses binary units labelled the way File Explorer does", () => {
   assert.equal(fmtBytes(0), "0 bytes");
@@ -121,4 +121,50 @@ test("scanNotes keeps each kind of problem separate", () => {
   );
   assert.equal(notes[1].detail, "C:\\OneDrive\\v.mp4: The cloud file provider is not running.");
   assert.equal(notes[3].warn, false, "a file deleted mid-scan is not a failure to read data that exists");
+});
+
+const GB = 1024 ** 3;
+/** A 1000 GB drive with `used` GB in use. */
+const drive = (used: number) => ({ total: 1000 * GB, free: (1000 - used) * GB });
+
+test("usedGap says nothing when the scan is within half a percent of used space, either way", () => {
+  assert.equal(usedGap(drive(500), 495 * GB, errors({ denied: 3 })), null);
+  assert.equal(usedGap(drive(500), 505 * GB, errors({ denied: 3 })), null);
+  assert.notEqual(usedGap(drive(500), 494 * GB, errors({})), null);
+  assert.notEqual(usedGap(drive(500), 506 * GB, errors({})), null);
+});
+
+test("usedGap calls the gap not readable only when reads failed, and counts them the way the status bar does", () => {
+  const gap = usedGap(drive(500), 480 * GB, errors({ denied: 2, metadata: 1, vanished: 5, cloud_size: 4 }))!;
+  assert.equal(gap.label, "Not readable");
+  assert.equal(gap.bytes, 20 * GB);
+  assert.ok(gap.swatch);
+  assert.match(gap.detail, /3 items couldn't be read/);
+  assert.match(gap.detail, /file system reserves/, "the reserved space it also holds is named, not hidden");
+  assert.match(usedGap(drive(500), 480 * GB, errors({ open_dir: 1 }))!.detail, /1 item couldn't be read/);
+});
+
+test("usedGap does not blame unreadable folders for the gap after a scan that read everything", () => {
+  const gap = usedGap(drive(500), 480 * GB, errors({ vanished: 2, cloud_size: 1 }))!;
+  assert.equal(gap.label, "Not in files");
+  assert.ok(gap.swatch);
+  assert.match(gap.detail, /Every folder was read/);
+  assert.doesNotMatch(gap.detail, /couldn't be read/);
+});
+
+test("usedGap makes no claim about reads for preview data saved without errors", () => {
+  const gap = usedGap(drive(500), 480 * GB, undefined)!;
+  assert.equal(gap.label, "Not in files");
+  assert.doesNotMatch(gap.detail, /Every folder was read/);
+});
+
+test("usedGap reports a scan that adds up to more than is used instead of hiding it", () => {
+  const gap = usedGap(drive(500), 530 * GB, errors({}))!;
+  assert.equal(gap.label, "Overcounted");
+  assert.equal(gap.bytes, 30 * GB);
+  assert.equal(gap.swatch, false, "an overcount is not an area of the drive");
+  assert.match(gap.detail, /30\.0 GB more than Windows reports as used/);
+  assert.match(gap.detail, /Hard links are counted once per link/);
+  assert.doesNotMatch(gap.detail, /couldn't be read/);
+  assert.match(usedGap(drive(500), 530 * GB, errors({ denied: 271 }))!.detail, /271 items couldn't be read, and their size can't be shown/);
 });

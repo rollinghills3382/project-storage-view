@@ -91,6 +91,60 @@ export function scanNotes(errors: ScanErrors | undefined, elevated: boolean): Sc
   return notes;
 }
 
+export interface UsedGap {
+  label: string;
+  bytes: number;
+  /** The full explanation, for the entry's tooltip. */
+  detail: string;
+  /** False when the figure is not an area of the drive, so it gets no swatch. */
+  swatch: boolean;
+}
+
+/** Differences smaller than this share of the drive get no legend entry. */
+const GAP_SHARE = 0.005;
+
+/**
+ * The legend entry for the difference between the space Windows reports as used and the bytes
+ * the scan counted. Only reads that failed are called "not readable"; the rest of the gap is
+ * space the file system keeps for itself. Hard links are counted once per link, so the scan can
+ * also add up to more than is used, which hides any unreadable space and is said as such.
+ */
+export function usedGap(drive: Pick<Drive, "total" | "free">, scanned: number, errors: ScanErrors | undefined): UsedGap | null {
+  const gap = drive.total - drive.free - scanned;
+  if (Math.abs(gap) <= drive.total * GAP_SHARE) return null;
+  // The same kinds the status bar reports as unread, so the two numbers agree.
+  const unread = errors && (["denied", ...READ_FAILURES] as ScanProblem[]).reduce((sum, k) => sum + (errors.counts[k] ?? 0), 0);
+  const items = (n: number) => (n === 1 ? "1 item" : `${fmtCount(n)} items`);
+  if (gap < 0) {
+    const over = -gap;
+    return {
+      label: "Overcounted",
+      bytes: over,
+      detail:
+        `The scan adds up to ${fmtBytes(over)} more than Windows reports as used. Hard links are counted once per link, so a file stored once on disk can be counted more than once.` +
+        (unread ? ` ${items(unread)} couldn't be read, and their size can't be shown while the scan counts more than is used.` : ""),
+      swatch: false,
+    };
+  }
+  if (unread) {
+    return {
+      label: "Not readable",
+      bytes: gap,
+      detail: `Used space the scan found in no file. ${items(unread)} couldn't be read. This also includes space the file system reserves for itself, which can't be measured separately, and hard links counted more than once can make it look smaller than it is.`,
+      swatch: true,
+    };
+  }
+  return {
+    label: "Not in files",
+    bytes: gap,
+    detail:
+      unread === 0
+        ? "Used space the scan found in no file. Every folder was read, so this is space the file system keeps for itself, such as its own records and the unused ends of clusters."
+        : "Used space the scan found in no file: folders that couldn't be read, plus space the file system keeps for itself.",
+    swatch: true,
+  };
+}
+
 export interface ScanProgress {
   scan: number;
   drive: string;
