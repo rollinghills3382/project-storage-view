@@ -87,12 +87,14 @@ impl Drop for Handle {
     }
 }
 
-/// `\\?\` form of an absolute path, as std uses for long paths, so folders deeper than
-/// MAX_PATH open too.
+/// `\\?\` form of a path, as std uses for long paths, so folders deeper than MAX_PATH open
+/// too. A `\\?\` path is passed to the file system as is, so the path is made absolute and
+/// normalized first (`/` to `\`, `.` and `..` resolved), as std does.
 fn verbatim(path: &Path) -> Vec<u16> {
-    let raw: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let full = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let raw: Vec<u16> = full.as_os_str().encode_wide().collect();
     let starts = |p: &str| raw.starts_with(&p.encode_utf16().collect::<Vec<u16>>());
-    let mut out: Vec<u16> = if !path.is_absolute() || starts(r"\\?\") || starts(r"\\.\") {
+    let mut out: Vec<u16> = if !full.is_absolute() || starts(r"\\?\") || starts(r"\\.\") {
         raw
     } else if starts(r"\\") {
         r"\\?\UNC".encode_utf16().chain(raw[1..].iter().copied()).collect()
