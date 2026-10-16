@@ -34,6 +34,9 @@ export interface ViewNode {
   /** Drive only: every scanned byte by category, largest first, counted before the
    * display limits bundle anything into a "smaller items" tile. */
   categories?: { category: Category; size: number }[];
+  /** Bytes of hard links in here that are counted under another name, outside `size`.
+   * Left out when there are none. */
+  linked?: number;
 }
 
 /** Why a path could not be read. Only `denied` is something administrator rights can fix. */
@@ -45,6 +48,21 @@ export interface ScanErrors {
   samples: { kind: ScanProblem; path: string; message: string }[];
 }
 
+/** Files with several hard links, each counted once. */
+export interface LinkReport {
+  /** Whether hard links were looked for at all. */
+  checked: boolean;
+  skipped_because?: string;
+  /** Files found under more than one name. */
+  files: number;
+  /** Names whose bytes are counted under another name of the same file. */
+  links: number;
+  /** What those names would have added. */
+  bytes: number;
+  /** Files that couldn't be checked, so may be counted under several names. */
+  unchecked: number;
+}
+
 export interface ScanSummary {
   /** The run that produced these results. Scan events all carry one. */
   scan: number;
@@ -53,6 +71,8 @@ export interface ScanSummary {
   dirs: number;
   /** Missing from preview data saved by older builds. */
   errors?: ScanErrors;
+  /** Missing from preview data saved by older builds. */
+  links?: LinkReport;
   elapsed_ms: number;
 }
 
@@ -91,6 +111,41 @@ export function scanNotes(errors: ScanErrors | undefined, elevated: boolean): Sc
   return notes;
 }
 
+const LINK_RULE = "Each is counted once, under the name whose folder comes first alphabetically (a folder's own files before its subfolders), so a file shared by System32 and WinSxS counts in System32.";
+
+/** Status-bar notes for files found under more than one name. */
+export function linkNotes(links: LinkReport | undefined): ScanNote[] {
+  if (!links?.checked) return [];
+  const notes: ScanNote[] = [];
+  if (links.bytes > 0) {
+    const files = links.files === 1 ? "1 file has" : `${fmtCount(links.files)} files have`;
+    const names = links.links === 1 ? "Its other name" : `Their other ${fmtCount(links.links)} names`;
+    notes.push({
+      text: `Hard links counted once: ${fmtBytes(links.bytes)}`,
+      warn: false,
+      detail: `${files} more than one name on this drive (hard links, which Windows uses throughout WinSxS). ${LINK_RULE} ${names} would have added ${fmtBytes(links.bytes)}.`,
+    });
+  }
+  if (links.unchecked > 0) {
+    notes.push({
+      text: `${links.unchecked === 1 ? "1 file" : `${fmtCount(links.unchecked)} files`} not checked for hard links`,
+      warn: true,
+      detail: "These may be counted once for every name they have, so the totals can be a little high.",
+    });
+  }
+  return notes;
+}
+
+/** The selection bar's mention of hard links in the selected item that count somewhere else. */
+export function linkedNote(n: Pick<ViewNode, "linked">): ScanNote | null {
+  if (!n.linked) return null;
+  return {
+    text: `${fmtBytes(n.linked)} in hard links counted elsewhere`,
+    warn: false,
+    detail: "Files in here that also have a name in a folder that comes earlier alphabetically. Their space is counted there, not in this total.",
+  };
+}
+
 export interface UsedGap {
   label: string;
   bytes: number;
@@ -109,9 +164,11 @@ const GAP_SHARE = 0.005;
  * space the file system keeps for itself. Hard links are counted once per link, so the scan can
  * also add up to more than is used, which hides any unreadable space and is said as such.
  */
-export function usedGap(drive: Pick<Drive, "total" | "free">, scanned: number, errors: ScanErrors | undefined): UsedGap | null {
+export function usedGap(drive: Pick<Drive, "total" | "free">, scanned: number, errors: ScanErrors | undefined, links?: LinkReport): UsedGap | null {
   const gap = drive.total - drive.free - scanned;
   if (Math.abs(gap) <= drive.total * GAP_SHARE) return null;
+  // Once every file was checked for hard links, they no longer explain any of the difference.
+  const linksCounted = !!links?.checked && links.unchecked === 0;
   // The same kinds the status bar reports as unread, so the two numbers agree.
   const unread = errors && (["denied", ...READ_FAILURES] as ScanProblem[]).reduce((sum, k) => sum + (errors.counts[k] ?? 0), 0);
   const items = (n: number) => (n === 1 ? "1 item" : `${fmtCount(n)} items`);
@@ -121,7 +178,10 @@ export function usedGap(drive: Pick<Drive, "total" | "free">, scanned: number, e
       label: "Overcounted",
       bytes: over,
       detail:
-        `The scan adds up to ${fmtBytes(over)} more than Windows reports as used. Hard links are counted once per link, so a file stored once on disk can be counted more than once.` +
+        `The scan adds up to ${fmtBytes(over)} more than Windows reports as used. ` +
+        (linksCounted
+          ? "Hard links are already counted once, so this is most likely files Windows stores compressed (for example with Compact OS) or as sparse files: they take less space than their length, and Storage View counts their length."
+          : "Hard links are counted once per link, so a file stored once on disk can be counted more than once.") +
         (unread ? ` ${items(unread)} couldn't be read, and their size can't be shown while the scan counts more than is used.` : ""),
       swatch: false,
     };
@@ -130,7 +190,9 @@ export function usedGap(drive: Pick<Drive, "total" | "free">, scanned: number, e
     return {
       label: "Not readable",
       bytes: gap,
-      detail: `Used space the scan found in no file. ${items(unread)} couldn't be read. This also includes space the file system reserves for itself, which can't be measured separately, and hard links counted more than once can make it look smaller than it is.`,
+      detail:
+        `Used space the scan found in no file. ${items(unread)} couldn't be read. This also includes space the file system reserves for itself, which can't be measured separately` +
+        (linksCounted ? "." : ", and hard links counted more than once can make it look smaller than it is."),
       swatch: true,
     };
   }

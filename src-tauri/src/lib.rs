@@ -78,10 +78,11 @@ impl AppState {
         }
     }
 
-    /// Scans `root`, groups it by app and publishes the result. Cancellation is checked
-    /// again after each slow step, so a Stop pressed while apps are being detected or the
-    /// tree is being grouped still ends the run without results.
-    fn complete(&self, run: &Arc<Run>, root: &Path, drive: &str, detect_apps: impl FnOnce() -> Vec<apps::InstalledApp>) -> (Outcome, u64) {
+    /// Scans `root`, groups it by app and publishes the result, returning the file count and
+    /// what was found about hard links. Cancellation is checked again after each slow step, so
+    /// a Stop pressed while apps are being detected or the tree is being grouped still ends the
+    /// run without results.
+    fn complete(&self, run: &Arc<Run>, root: &Path, drive: &str, detect_apps: impl FnOnce() -> Vec<apps::InstalledApp>) -> (Outcome, u64, scan::LinkReport) {
         let p = &run.progress;
         let tree = scan::scan(root, p);
         let view = (|| {
@@ -96,7 +97,8 @@ impl AppState {
             (!p.cancelled()).then_some(view)
         })();
         let files = view.as_ref().map_or(0, |v| v.tree.file_count());
-        (self.publish(run, drive, view), files)
+        let links = view.as_ref().map(|v| v.tree.links.clone()).unwrap_or_default();
+        (self.publish(run, drive, view), files, links)
     }
 }
 
@@ -118,6 +120,8 @@ struct ScanSummary {
     dirs: u64,
     /// Paths that could not be read, by cause, with a few examples of each.
     errors: scan::ErrorReport,
+    /// Files with several hard links, each counted once.
+    links: scan::LinkReport,
     elapsed_ms: u64,
 }
 
@@ -200,7 +204,7 @@ fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<u
             };
 
             let state = app.state::<AppState>();
-            let (outcome, files) = state.complete(&run, &root, &drive, apps::installed_apps);
+            let (outcome, files, links) = state.complete(&run, &root, &drive, apps::installed_apps);
             // Progress stops before the outcome is reported, so no progress event for this
             // run can arrive after it.
             finished.store(true, Relaxed);
@@ -214,6 +218,7 @@ fn start_scan(app: AppHandle, state: State<AppState>, drive: String) -> Result<u
                         files,
                         dirs: run.progress.dirs.load(Relaxed),
                         errors: run.progress.errors.report(),
+                        links,
                         elapsed_ms: started.elapsed().as_millis() as u64,
                     };
                     let _ = app.emit("scan-done", summary);
@@ -297,7 +302,7 @@ mod tests {
         let dir = drive_with_a_file();
         let state = AppState::default();
         let run = state.begin();
-        let (outcome, files) = state.complete(&run, dir.path(), "C:\\", Vec::new);
+        let (outcome, files, _) = state.complete(&run, dir.path(), "C:\\", Vec::new);
         assert_eq!(outcome, Outcome::Published);
         assert_eq!(files, 1);
         assert!(stored(&state, "C:\\").is_some());
@@ -316,7 +321,7 @@ mod tests {
 
         let run = state.begin();
         state.cancel(Some(run.id));
-        let (outcome, _) = state.complete(&run, dir.path(), "C:\\", || panic!("a cancelled scan must not go on to detect apps"));
+        let (outcome, ..) = state.complete(&run, dir.path(), "C:\\", || panic!("a cancelled scan must not go on to detect apps"));
         assert_eq!(outcome, Outcome::Cancelled);
         assert!(Arc::ptr_eq(&stored(&state, "C:\\").unwrap(), &before), "the earlier view is kept");
     }
@@ -328,7 +333,7 @@ mod tests {
         let dir = drive_with_a_file();
         let state = AppState::default();
         let run = state.begin();
-        let (outcome, _) = state.complete(&run, dir.path(), "C:\\", || {
+        let (outcome, ..) = state.complete(&run, dir.path(), "C:\\", || {
             state.cancel(None);
             Vec::new()
         });
