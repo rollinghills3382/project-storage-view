@@ -35,6 +35,8 @@ pub struct View {
     owner: Vec<u32>,
     /// Node size minus any claimed folders inside it.
     eff: Vec<u64>,
+    /// The same for the bytes of hard links counted under another name.
+    linked: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +100,13 @@ pub struct ViewNode {
     /// tile bundles the tail, so it does not depend on what fits on screen.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<CategoryTotal>>,
+    /// Bytes of hard links in here that are counted under another name, outside `size`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub linked: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -214,18 +223,23 @@ impl View {
 
         // Children always have larger ids than their parents, so one reverse pass works.
         let mut eff = vec![0u64; tree.nodes.len()];
+        let mut linked = vec![0u64; tree.nodes.len()];
         for id in (0..tree.nodes.len()).rev() {
             let node = &tree.nodes[id];
-            eff[id] = match node.kind {
-                NodeKind::Dir => node.children.iter().filter(|&&c| owner[c as usize] == UNOWNED).map(|&c| eff[c as usize]).sum(),
-                _ => node.size,
+            (eff[id], linked[id]) = match node.kind {
+                NodeKind::Dir => node
+                    .children
+                    .iter()
+                    .filter(|&&c| owner[c as usize] == UNOWNED)
+                    .fold((0, 0), |(e, l), &c| (e + eff[c as usize], l + linked[c as usize])),
+                _ => (node.size, node.linked),
             };
         }
         for g in &mut groups {
             g.locations.sort_by(|&a, &b| eff[b as usize].cmp(&eff[a as usize]));
             g.size = g.locations.iter().map(|&l| eff[l as usize]).sum();
         }
-        View { tree, groups, owner, eff }
+        View { tree, groups, owner, eff, linked }
     }
 
     pub fn contains(&self, id: Id) -> bool {
@@ -243,6 +257,16 @@ impl View {
             Id::Group(g) => self.groups[g as usize].size,
             Id::Node(n) => self.eff[n as usize],
             Id::Tail(inner, offset) => self.children(*inner).iter().skip(offset).map(|c| self.size(c.clone())).sum(),
+        }
+    }
+
+    /// Bytes of hard links inside `id` that are counted under another name.
+    pub fn linked(&self, id: Id) -> u64 {
+        match id {
+            Id::Root => self.tree.node(Tree::ROOT).linked,
+            Id::Group(g) => self.groups[g as usize].locations.iter().map(|&l| self.linked[l as usize]).sum(),
+            Id::Node(n) => self.linked[n as usize],
+            Id::Tail(inner, offset) => self.children(*inner).into_iter().skip(offset).map(|c| self.linked(c)).sum(),
         }
     }
 
@@ -349,7 +373,8 @@ impl View {
         };
         let key = id.key();
         let categories = matches!(id, Id::Root).then(|| self.category_totals());
-        ViewNode { id: key, name, size: self.size(id.clone()), kind, category: self.category(id), path, locations, has_children, children: None, categories }
+        let linked = self.linked(id.clone());
+        ViewNode { id: key, name, size: self.size(id.clone()), kind, category: self.category(id), path, locations, has_children, children: None, categories, linked }
     }
 
     /// The node plus `depth` levels of children, largest first. Long tails are bundled into one "more" entry.
@@ -392,6 +417,7 @@ impl View {
                 has_children: true,
                 children: None,
                 categories: None,
+                linked: kids[limit..].iter().map(|k| self.linked(k.clone())).sum(),
             });
         }
         v.children = Some(out);
@@ -502,6 +528,24 @@ mod tests {
         let tree = scan(r, &Progress::default());
         let view = View::build(tree, &apps);
         (dir, view)
+    }
+
+    /// A hard link inside an app's data counts once, at the install folder that comes first,
+    /// and the app says how much of its data is counted there.
+    #[test]
+    fn an_app_carries_the_hard_links_counted_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, r"Program Files\Docker\Docker\app.bin", 4);
+        write(r, r"Users\me\AppData\Local\Docker\wsl\disk.vhdx", 50);
+        fs::hard_link(r.join(r"Program Files\Docker\Docker\app.bin"), r.join(r"Users\me\AppData\Local\Docker\wsl\app.bin")).unwrap();
+        let apps = vec![app(r, "Docker Desktop", "Docker Inc.", r"Program Files\Docker\Docker", false)];
+        let v = View::build(scan(r, &Progress::default()), &apps);
+        let (g, docker) = find_group(&v, "Docker Desktop");
+        assert_eq!(docker.size, 54 * MB);
+        assert_eq!(v.linked(Id::Group(g)), 4 * MB);
+        assert_eq!(v.view(Id::Root, 0).linked, 4 * MB);
+        assert_eq!(v.view(Id::Root, 0).size, 54 * MB);
     }
 
     #[test]
@@ -819,5 +863,29 @@ mod tests {
         let expected: std::collections::HashSet<u32> = (1..v.tree.nodes.len() as u32).filter(|&n| shown(n)).collect();
         let missing: Vec<String> = expected.difference(&seen).map(|&n| v.tree.path(n).display().to_string()).collect();
         assert!(missing.is_empty(), "unreachable: {missing:?}");
+    }
+    /// Hard links counted elsewhere follow a folder's own bytes up the levels of the view,
+    /// including into a "smaller items" tile.
+    #[test]
+    fn linked_bytes_add_up_the_levels_of_the_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, "a/x.bin", 3);
+        for i in 0..70 {
+            write(r, &format!("b/f{i:02}/own.bin"), 2);
+            fs::hard_link(r.join("a/x.bin"), r.join(format!("b/f{i:02}/x.bin"))).unwrap();
+        }
+        let v = View::build(scan(r, &Progress::default()), &[]);
+        let root = v.view(Id::Root, 2);
+        assert_eq!((root.size, root.linked), (143 * MB, 210 * MB));
+        let kids = root.children.unwrap();
+        let b = kids.iter().find(|k| k.name == "b").unwrap();
+        assert_eq!((b.size, b.linked), (140 * MB, 210 * MB));
+        let grandkids = b.children.as_ref().unwrap();
+        let tail = grandkids.iter().find(|k| k.kind == "more").expect("a smaller items tile");
+        let shown: u64 = grandkids.iter().map(|k| k.linked).sum();
+        assert_eq!(shown, b.linked, "the tile carries the rest");
+        assert_eq!(tail.linked, (70 - grandkids.len() as u64 + 1) * 3 * MB);
+        assert!(!serde_json::to_string(&kids.iter().find(|k| k.name == "a").unwrap()).unwrap().contains("linked"), "zero is left out");
     }
 }

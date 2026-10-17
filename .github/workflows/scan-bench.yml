@@ -1,0 +1,83 @@
+name: Scan benchmark
+
+# Scans the runner's C: drive (a real Windows install with a populated WinSxS) with the old
+# listing, the listing that returns file IDs, and with hard links counted once, so a change to
+# the scanner shows what it costs in time and memory and how its WinSxS figure compares with
+# DISM's own accounting.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - src-tauri/src/scan.rs
+      - src-tauri/src/scan/**
+      - src-tauri/examples/scan_bench.rs
+      - .github/workflows/scan-bench.yml
+
+concurrency:
+  group: scan-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: windows-latest
+    env:
+      # The scan is bound by file system calls; a quicker build loses nothing that matters here.
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The Tauri crate embeds dist/ at compile time.
+      - run: npm ci
+      - run: npm run build
+
+      - run: cargo build --release --example scan_bench
+        working-directory: src-tauri
+
+      - name: Scan C:\ three times in each mode
+        shell: pwsh
+        run: |
+          $exe = 'src-tauri/target/release/examples/scan_bench.exe'
+          & $exe 'C:\' --mode std | Out-Null   # warm the file system cache
+          $orders = @(@('std', 'ids', 'links'), @('ids', 'links', 'std'), @('links', 'std', 'ids'))
+          foreach ($order in $orders) { foreach ($m in $order) { & $exe 'C:\' --mode $m | Tee-Object -FilePath bench.jsonl -Append } }
+
+      - name: Windows' own accounting of WinSxS and used space
+        shell: pwsh
+        run: |
+          fsutil volume diskfree C: | Tee-Object -FilePath used.txt
+          Dism.exe /Online /Cleanup-Image /AnalyzeComponentStore | Tee-Object -FilePath dism.txt
+
+      - name: Summary
+        shell: pwsh
+        run: |
+          $runs = Get-Content bench.jsonl | ConvertFrom-Json
+          $gb = { param($b) '{0:N2} GB' -f ($b / 1GB) }
+          $rows = foreach ($m in 'std', 'ids', 'links') {
+            $r = $runs | Where-Object mode -eq $m
+            $ms = ($r.ms | Sort-Object)[1]
+            $last = $r[-1]
+            "| $m | $ms | $('{0:N0}' -f $last.files) | $(& $gb $last.counted_bytes) | $(& $gb $last.winsxs[0]) | $(& $gb $last.winsxs[1]) | $('{0:N0}' -f ($last.peak_private / 1MB)) MB |"
+          }
+          $lines = @('| mode | median ms | files | counted | WinSxS | WinSxS linked | peak private |', '|---|---|---|---|---|---|---|') + $rows
+          $lines += '', '```', (Get-Content used.txt), (Get-Content dism.txt | Select-String 'Size|Shared|Cache'), '```'
+          $lines | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scan-bench
+          path: |
+            bench.jsonl
+            used.txt
+            dism.txt

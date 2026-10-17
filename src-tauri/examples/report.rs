@@ -28,6 +28,17 @@ fn main() {
         installed.len(),
         started.elapsed().as_secs_f64()
     );
+    let links = &view.tree.links;
+    match links.skipped_because {
+        None => println!(
+            "hard links: {} files under {} more names, {} counted once{}\n",
+            links.files,
+            links.links,
+            gb(links.bytes).trim(),
+            if links.unchecked > 0 { format!(" · {} files not checked", links.unchecked) } else { String::new() }
+        ),
+        Some(why) => println!("hard links: not checked ({why})\n"),
+    }
     let top = view.view(Id::Root, 2);
     for c in top.children.unwrap_or_default().iter().take(40) {
         let cat = c.category.map(|c| format!("{c:?}")).unwrap_or_default();
@@ -118,7 +129,7 @@ fn write_json(view: &View, root: &std::path::Path, elapsed_ms: u64, dirs: u64, e
     let drive = drives::list().into_iter().find(|d| d.mount.eq_ignore_ascii_case(&root.display().to_string()));
     let doc = serde_json::json!({
         "drive": drive,
-        "summary": { "drive": root.display().to_string(), "files": view.tree.file_count(), "dirs": dirs, "errors": errors, "elapsed_ms": elapsed_ms },
+        "summary": { "drive": root.display().to_string(), "files": view.tree.file_count(), "dirs": dirs, "errors": errors, "links": view.tree.links, "elapsed_ms": elapsed_ms },
         "maps": maps,
         "nodes": nodes,
     });

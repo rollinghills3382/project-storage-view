@@ -7,7 +7,21 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { canOpen } from "../src/treemap.ts";
-import { CATEGORIES, catColor, fmtBytes, fmtCount, pct, scanNotes, usedGap, type ScanErrors, type ScanProblem, type ViewNode } from "../src/ui.ts";
+import {
+  CATEGORIES,
+  catColor,
+  fmtBytes,
+  fmtCount,
+  linkedNote,
+  linkNotes,
+  pct,
+  scanNotes,
+  usedGap,
+  type LinkReport,
+  type ScanErrors,
+  type ScanProblem,
+  type ViewNode,
+} from "../src/ui.ts";
 
 test("fmtBytes uses binary units labelled the way File Explorer does", () => {
   assert.equal(fmtBytes(0), "0 bytes");
@@ -167,4 +181,50 @@ test("usedGap reports a scan that adds up to more than is used instead of hiding
   assert.match(gap.detail, /Hard links are counted once per link/);
   assert.doesNotMatch(gap.detail, /couldn't be read/);
   assert.match(usedGap(drive(500), 530 * GB, errors({ denied: 271 }))!.detail, /271 items couldn't be read, and their size can't be shown/);
+});
+
+const links = (r: Partial<LinkReport>): LinkReport => ({ checked: true, files: 0, links: 0, bytes: 0, unchecked: 0, ...r });
+
+test("usedGap stops blaming hard links once every file was checked for them", () => {
+  const over = usedGap(drive(500), 530 * GB, errors({}), links({ files: 10, links: 12, bytes: 5 * GB }))!;
+  assert.equal(over.label, "Overcounted");
+  assert.doesNotMatch(over.detail, /counted once per link/);
+  assert.match(over.detail, /already counted once/);
+  assert.match(over.detail, /compressed/, "names what is left to explain it");
+  const unread = usedGap(drive(500), 480 * GB, errors({ denied: 2 }), links({}))!;
+  assert.doesNotMatch(unread.detail, /hard links/);
+  // A scan that skipped some files, or never looked, keeps the old explanation.
+  assert.match(usedGap(drive(500), 530 * GB, errors({}), links({ unchecked: 3 }))!.detail, /counted once per link/);
+  assert.match(usedGap(drive(500), 530 * GB, errors({}), links({ checked: false }))!.detail, /counted once per link/);
+  assert.match(usedGap(drive(500), 480 * GB, errors({ denied: 2 }), undefined)!.detail, /hard links counted more than once/);
+});
+
+test("linkNotes says how much counting hard links once saved, and the rule it used", () => {
+  const [note] = linkNotes(links({ files: 61234, links: 64410, bytes: 5.4 * GB }));
+  assert.equal(note.text, "Hard links counted once: 5.40 GB");
+  assert.equal(note.warn, false);
+  assert.match(note.detail, /61,234 files have more than one name/);
+  assert.match(note.detail, /Their other 64,410 names would have added 5\.40 GB/);
+  assert.match(note.detail, /counts in System32/);
+  const [one] = linkNotes(links({ files: 1, links: 1, bytes: 2048 }));
+  assert.match(one.detail, /^1 file has more than one name.*Its other name would have added 2\.00 KB\.$/);
+});
+
+test("linkNotes says nothing when there is nothing to say, and warns about files it could not check", () => {
+  assert.deepEqual(linkNotes(undefined), []);
+  assert.deepEqual(linkNotes(links({})), []);
+  assert.deepEqual(linkNotes(links({ checked: false, skipped_because: "network drive" })), []);
+  const notes = linkNotes(links({ unchecked: 1 }));
+  assert.deepEqual(
+    notes.map((n) => [n.text, n.warn]),
+    [["1 file not checked for hard links", true]],
+  );
+});
+
+test("linkedNote explains bytes counted in another folder, and only when there are some", () => {
+  assert.equal(linkedNote({}), null);
+  assert.equal(linkedNote({ linked: 0 }), null);
+  const note = linkedNote({ linked: 5 * GB })!;
+  assert.equal(note.text, "5.00 GB in hard links counted elsewhere");
+  assert.match(note.detail, /counted there, not in this total/);
 });

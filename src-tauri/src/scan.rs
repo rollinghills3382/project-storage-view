@@ -1,5 +1,11 @@
 //! Parallel directory walk that turns a drive into a compact in-memory tree.
 
+mod links;
+#[cfg(windows)]
+mod winlist;
+
+pub use links::LinkReport;
+use links::NO_KEY;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::fs;
@@ -29,6 +35,8 @@ pub struct Node {
     /// Sorted by size, largest first.
     pub children: Vec<u32>,
     pub kind: NodeKind,
+    /// Bytes of hard links in here that are counted under another name of the same file.
+    pub linked: u64,
 }
 
 /// Nodes are stored in pre-order, so a child's id is always greater than its parent's.
@@ -36,6 +44,7 @@ pub struct Node {
 pub struct Tree {
     pub root_path: PathBuf,
     pub nodes: Vec<Node>,
+    pub links: LinkReport,
 }
 
 impl Tree {
@@ -270,41 +279,209 @@ impl ErrorLog {
 #[derive(Default)]
 struct TmpDir {
     name: String,
-    files: Vec<(String, u64)>,
+    files: Vec<TmpFile>,
     small_count: u32,
     small_size: u64,
+    /// A packed key and size for each small file with a key, until hard links are resolved.
+    small_keys: Box<[u64]>,
+    /// Bytes of small files here that are counted under another name of the same file.
+    small_linked: u64,
     dirs: Vec<TmpDir>,
 }
 
+/// A file of at least `SMALL_FILE_LIMIT` bytes.
+struct TmpFile {
+    name: String,
+    size: u64,
+    /// The file's ID, or `NO_KEY`, until hard links are resolved.
+    key: u64,
+    /// Bytes counted under another name of the same file instead of this one.
+    linked: u64,
+}
+
+/// How a folder is listed.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    /// `std::fs::read_dir`. Gives file IDs only on Unix, where tests run.
+    Std,
+    /// Windows directory queries that return each entry's file ID, so hard links of one file
+    /// can be recognized without opening anything.
+    #[cfg(windows)]
+    Ids(winlist::IdClass),
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct ScanOptions {
+    pub listing: Listing,
+    /// Count a file with several hard links once.
+    pub count_links_once: bool,
+    /// Why hard links are not looked for, when they are not.
+    pub skipped_because: Option<&'static str>,
+    /// Most file IDs kept at once.
+    pub max_keys: u64,
+}
+
+impl ScanOptions {
+    /// What the drive or folder at `root` supports.
+    pub fn for_root(root: &Path) -> Self {
+        #[cfg(windows)]
+        let (listing, skipped_because) = match winlist::id_class(root) {
+            Ok(class) => (Listing::Ids(class), None),
+            Err(why) => (Listing::Std, Some(why)),
+        };
+        #[cfg(not(windows))]
+        let (listing, skipped_because) = {
+            let _ = root;
+            (Listing::Std, None)
+        };
+        ScanOptions { listing, count_links_once: skipped_because.is_none(), skipped_because, max_keys: links::MAX_KEYS }
+    }
+}
+
+/// What every folder of one walk shares.
+struct Walk<'a> {
+    p: &'a Progress,
+    listing: Listing,
+    keys: bool,
+    max_keys: u64,
+    kept: AtomicU64,
+    /// Set once more keys were found than `max_keys`. From then on none are kept, and the
+    /// scan does not look for hard links at all, so which files are checked never depends on
+    /// which thread got there first.
+    too_many: AtomicBool,
+    unchecked: AtomicU64,
+}
+
 pub fn scan(root: &Path, progress: &Progress) -> Tree {
+    scan_with(root, progress, ScanOptions::for_root(root))
+}
+
+#[doc(hidden)]
+pub fn scan_with(root: &Path, progress: &Progress, options: ScanOptions) -> Tree {
     let pool = rayon::ThreadPoolBuilder::new()
         .stack_size(16 << 20)
         .build()
         .expect("failed to start scan threads");
-    let tmp = pool.install(|| walk(root, root.display().to_string(), progress));
+    let w = Walk {
+        p: progress,
+        listing: options.listing,
+        keys: options.count_links_once,
+        max_keys: options.max_keys,
+        kept: AtomicU64::new(0),
+        too_many: AtomicBool::new(false),
+        unchecked: AtomicU64::new(0),
+    };
+    let mut tmp = pool.install(|| walk(root, root.display().to_string(), &w));
+    let too_many = w.too_many.into_inner();
+    let mut links = match (options.count_links_once, too_many) {
+        (true, false) => LinkReport { checked: true, unchecked: w.unchecked.into_inner(), ..Default::default() },
+        (true, true) => LinkReport { skipped_because: Some("too many files"), ..Default::default() },
+        (false, _) => LinkReport { skipped_because: options.skipped_because, ..Default::default() },
+    };
+    if links.checked && !progress.cancelled() {
+        let kept = w.kept.into_inner();
+        pool.install(|| links::count_once(&mut tmp, kept, &mut links, &|| progress.cancelled()));
+    }
     let mut nodes = Vec::new();
     flatten(tmp, NO_PARENT, &mut nodes);
-    Tree { root_path: root.to_path_buf(), nodes }
+    Tree { root_path: root.to_path_buf(), nodes, links }
 }
 
-fn walk(path: &Path, name: String, p: &Progress) -> TmpDir {
-    let mut out = TmpDir { name, ..Default::default() };
-    if p.cancelled() {
-        return out;
+/// What one folder's listing has found so far.
+struct Folder {
+    out: TmpDir,
+    subdirs: Vec<(PathBuf, String)>,
+    small_keys: Vec<u64>,
+}
+
+impl Folder {
+    fn add_file(&mut self, w: &Walk, name: String, size: u64, key: u64) {
+        w.p.files.fetch_add(1, Relaxed);
+        w.p.bytes.fetch_add(size, Relaxed);
+        // An empty file adds nothing, whatever names it has.
+        let key = if size == 0 { NO_KEY } else { key };
+        if w.keys && size > 0 && key == NO_KEY {
+            w.unchecked.fetch_add(1, Relaxed);
+        }
+        if size < SMALL_FILE_LIMIT {
+            self.out.small_count += 1;
+            self.out.small_size += size;
+            if key != NO_KEY {
+                self.small_keys.push(links::pack(key, size));
+            }
+        } else {
+            self.out.files.push(TmpFile { name, size, key, linked: 0 });
+        }
     }
+
+    /// Keeps this folder's keys while the walk is under the cap. Counted per folder rather
+    /// than per file, so threads rarely touch the shared counter.
+    fn keep_keys(&mut self, w: &Walk) {
+        let n = self.small_keys.len() as u64 + self.out.files.iter().filter(|f| f.key != NO_KEY).count() as u64;
+        if n == 0 {
+            return;
+        }
+        if w.too_many.load(Relaxed) || w.kept.fetch_add(n, Relaxed) + n > w.max_keys {
+            w.too_many.store(true, Relaxed);
+            self.small_keys = Vec::new();
+            self.out.files.iter_mut().for_each(|f| f.key = NO_KEY);
+            return;
+        }
+        self.out.small_keys = std::mem::take(&mut self.small_keys).into_boxed_slice();
+    }
+}
+
+/// How a listing ended.
+enum Listed {
+    Done,
+    Cancelled,
+    /// The file system does not answer the query that returns file IDs.
+    #[cfg(windows)]
+    Unsupported,
+}
+
+fn walk(path: &Path, name: String, w: &Walk) -> TmpDir {
+    let mut f = Folder { out: TmpDir { name, ..Default::default() }, subdirs: Vec::new(), small_keys: Vec::new() };
+    if w.p.cancelled() {
+        return f.out;
+    }
+    let listed = match w.listing {
+        Listing::Std => list_std(path, w, &mut f),
+        #[cfg(windows)]
+        Listing::Ids(class) => match list_ids(path, class, w, &mut f) {
+            Listed::Unsupported => list_std(path, w, &mut f),
+            done => done,
+        },
+    };
+    if let Listed::Cancelled = listed {
+        return f.out;
+    }
+    f.keep_keys(w);
+    if w.p.dirs.fetch_add(1, Relaxed).is_multiple_of(256) {
+        if let Ok(mut cur) = w.p.current.try_lock() {
+            *cur = path.display().to_string();
+        }
+    }
+    f.out.dirs = f.subdirs.into_par_iter().map(|(sp, sn)| walk(&sp, sn, w)).collect();
+    f.out
+}
+
+fn list_std(path: &Path, w: &Walk, f: &mut Folder) -> Listed {
+    let p = w.p;
     let entries = match fs::read_dir(path) {
         Ok(e) => e,
         Err(e) => {
             p.errors.record(Stage::OpenDir, path, &e);
-            return out;
+            return Listed::Done;
         }
     };
-    let mut subdirs = Vec::new();
     for entry in entries {
         // Checked per entry, not just per folder: one folder can hold hundreds of
         // thousands of files, and Stop should not wait for all of them.
         if p.cancelled() {
-            return out;
+            return Listed::Cancelled;
         }
         let entry = match entry {
             Ok(e) => e,
@@ -328,7 +505,7 @@ fn walk(path: &Path, name: String, p: &Progress) -> TmpDir {
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         if ft.is_dir() {
-            subdirs.push((entry.path(), name));
+            f.subdirs.push((entry.path(), name));
             continue;
         }
         // On Windows this comes from the directory listing itself, with no extra file open.
@@ -348,22 +525,72 @@ fn walk(path: &Path, name: String, p: &Progress) -> TmpDir {
                 0
             }
         };
-        p.files.fetch_add(1, Relaxed);
-        p.bytes.fetch_add(size, Relaxed);
-        if size < SMALL_FILE_LIMIT {
-            out.small_count += 1;
-            out.small_size += size;
-        } else {
-            out.files.push((name, size));
-        }
+        let key = if w.keys { std_key(&md) } else { NO_KEY };
+        f.add_file(w, name, size, key);
     }
-    if p.dirs.fetch_add(1, Relaxed).is_multiple_of(256) {
-        if let Ok(mut cur) = p.current.try_lock() {
-            *cur = path.display().to_string();
+    Listed::Done
+}
+
+#[cfg(unix)]
+fn std_key(md: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    links::inode_key(md.ino())
+}
+
+/// std's listing on Windows has no file IDs.
+#[cfg(not(unix))]
+fn std_key(_md: &fs::Metadata) -> u64 {
+    NO_KEY
+}
+
+/// Lists through the directory query that also returns file IDs. Everything else the walk
+/// uses comes from the same fields FindFirstFileExW reads for std's listing.
+#[cfg(windows)]
+fn list_ids(path: &Path, class: winlist::IdClass, w: &Walk, f: &mut Folder) -> Listed {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    let p = w.p;
+    let mut cancelled = false;
+    let result = winlist::list_dir(path, class, |e| {
+        if p.cancelled() {
+            cancelled = true;
+            return false;
         }
+        // Junctions and symlinks point at data that is counted where it really lives.
+        if e.is_link() {
+            return true;
+        }
+        let entry_path = || path.join(OsString::from_wide(e.name));
+        let name = String::from_utf16_lossy(e.name);
+        if e.is_dir() {
+            f.subdirs.push((entry_path(), name));
+            return true;
+        }
+        let size = match resident_size(e.attributes, e.len, || allocated_without_recall(&entry_path())) {
+            Ok(size) => size,
+            Err(err) => {
+                p.errors.record(Stage::CloudSize, &entry_path(), &err);
+                0
+            }
+        };
+        // On NTFS the ID's high half is zero and the low half is the file reference number.
+        let key = if w.keys && e.id >> 64 == 0 { links::ntfs_key(e.id as u64) } else { NO_KEY };
+        f.add_file(w, name, size, key);
+        true
+    });
+    match result {
+        _ if cancelled => Listed::Cancelled,
+        Ok(()) => Listed::Done,
+        Err(winlist::Failed::Open(e)) => {
+            p.errors.record(Stage::OpenDir, path, &e);
+            Listed::Done
+        }
+        Err(winlist::Failed::List(e)) => {
+            p.errors.record(Stage::ListDir, path, &e);
+            Listed::Done
+        }
+        Err(winlist::Failed::Unsupported) => Listed::Unsupported,
     }
-    out.dirs = subdirs.into_par_iter().map(|(sp, sn)| walk(&sp, sn, p)).collect();
-    out
 }
 
 const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
@@ -447,29 +674,30 @@ fn allocated_without_recall(path: &Path) -> io::Result<u64> {
 
 fn flatten(tmp: TmpDir, parent: u32, nodes: &mut Vec<Node>) -> u32 {
     let id = nodes.len() as u32;
-    nodes.push(Node { name: tmp.name.into(), size: 0, parent, children: Vec::new(), kind: NodeKind::Dir });
+    nodes.push(Node { name: tmp.name.into(), size: 0, parent, children: Vec::new(), kind: NodeKind::Dir, linked: 0 });
     let mut children = Vec::with_capacity(tmp.dirs.len() + tmp.files.len() + 1);
     for d in tmp.dirs {
         children.push(flatten(d, id, nodes));
     }
-    for (name, size) in tmp.files {
-        children.push(push_leaf(nodes, id, name, size, NodeKind::File));
+    for f in tmp.files {
+        children.push(push_leaf(nodes, id, f.name, f.size, NodeKind::File, f.linked));
     }
     if tmp.small_count > 0 {
         let name = match tmp.small_count {
             1 => "1 small file".to_string(),
             n => format!("{n} small files"),
         };
-        children.push(push_leaf(nodes, id, name, tmp.small_size, NodeKind::SmallFiles { count: tmp.small_count }));
+        children.push(push_leaf(nodes, id, name, tmp.small_size, NodeKind::SmallFiles { count: tmp.small_count }, tmp.small_linked));
     }
     children.sort_by(|&a, &b| nodes[b as usize].size.cmp(&nodes[a as usize].size));
     nodes[id as usize].size = children.iter().map(|&c| nodes[c as usize].size).sum();
+    nodes[id as usize].linked = children.iter().map(|&c| nodes[c as usize].linked).sum();
     nodes[id as usize].children = children;
     id
 }
 
-fn push_leaf(nodes: &mut Vec<Node>, parent: u32, name: String, size: u64, kind: NodeKind) -> u32 {
-    nodes.push(Node { name: name.into(), size, parent, children: Vec::new(), kind });
+fn push_leaf(nodes: &mut Vec<Node>, parent: u32, name: String, size: u64, kind: NodeKind, linked: u64) -> u32 {
+    nodes.push(Node { name: name.into(), size, parent, children: Vec::new(), kind, linked });
     (nodes.len() - 1) as u32
 }
 
@@ -551,6 +779,10 @@ mod tests {
         assert_eq!(tree.nodes.len(), 1);
     }
 
+    fn plain_walk(p: &Progress) -> Walk<'_> {
+        Walk { p, listing: Listing::Std, keys: false, max_keys: 0, kept: AtomicU64::new(0), too_many: AtomicBool::new(false), unchecked: AtomicU64::new(0) }
+    }
+
     fn err(kind: io::ErrorKind) -> io::Error {
         io::Error::new(kind, "test failure")
     }
@@ -591,7 +823,7 @@ mod tests {
     fn a_folder_that_vanished_mid_scan_is_reported_as_vanished() {
         let dir = tempfile::tempdir().unwrap();
         let p = Progress::default();
-        let out = walk(&dir.path().join("deleted meanwhile"), "x".into(), &p);
+        let out = walk(&dir.path().join("deleted meanwhile"), "x".into(), &plain_walk(&p));
         assert!(out.files.is_empty() && out.dirs.is_empty() && out.small_count == 0);
         let r = p.errors.report();
         assert_eq!(r.counts, ErrorCounts { vanished: 1, ..Default::default() });
@@ -606,7 +838,7 @@ mod tests {
         let file = dir.path().join("not a folder");
         write(&file, 10);
         let p = Progress::default();
-        walk(&file, "x".into(), &p);
+        walk(&file, "x".into(), &plain_walk(&p));
         let c = p.errors.report().counts;
         assert_eq!(c, ErrorCounts { open_dir: 1, ..Default::default() });
     }
@@ -664,6 +896,111 @@ mod tests {
     fn a_failed_size_query_is_an_error_not_zero() {
         let e = resident_size(PLACEHOLDER, 5_000_000, || Err(io::Error::other("provider not running"))).unwrap_err();
         assert_eq!(Problem::classify(Stage::CloudSize, &e), Problem::CloudSize);
+    }
+
+    fn size_of(tree: &Tree, path: &Path) -> u64 {
+        tree.node(tree.find(path).unwrap()).size
+    }
+
+    fn linked_of(tree: &Tree, path: &Path) -> u64 {
+        tree.node(tree.find(path).unwrap()).linked
+    }
+
+    /// One file under three names (WinSxS keeps a name for nearly every file in System32)
+    /// takes its space once, in the folder that comes first by name.
+    #[test]
+    fn a_hard_linked_file_counts_once_in_the_first_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let big = 3 * SMALL_FILE_LIMIT;
+        write(&r.join("Windows/WinSxS/amd64_x/shell32.dll"), big as usize);
+        fs::create_dir_all(r.join("Windows/System32")).unwrap();
+        fs::hard_link(r.join("Windows/WinSxS/amd64_x/shell32.dll"), r.join("Windows/System32/shell32.dll")).unwrap();
+        fs::hard_link(r.join("Windows/WinSxS/amd64_x/shell32.dll"), r.join("Windows/WinSxS/amd64_x/copy.dll")).unwrap();
+        write(&r.join("Windows/WinSxS/own.bin"), 2 * SMALL_FILE_LIMIT as usize);
+
+        let tree = scan(r, &Progress::default());
+        assert_eq!(size_of(&tree, r), big + 2 * SMALL_FILE_LIMIT, "the drive total counts the file once");
+        assert_eq!(size_of(&tree, &r.join("Windows/System32")), big);
+        assert_eq!(size_of(&tree, &r.join("Windows/WinSxS")), 2 * SMALL_FILE_LIMIT, "only what WinSxS alone holds");
+        assert_eq!(linked_of(&tree, &r.join("Windows/WinSxS")), 2 * big, "and what it shares, for the explanation");
+        assert_eq!(linked_of(&tree, &r.join("Windows/System32")), 0);
+        assert_eq!(linked_of(&tree, r), 2 * big);
+        // Every name is still a file of its folder, so file counts do not change.
+        assert_eq!(tree.file_count(), 4);
+        assert_eq!(tree.links, LinkReport { checked: true, files: 1, links: 2, bytes: 2 * big, ..Default::default() });
+    }
+
+    #[test]
+    fn small_hard_linked_files_count_once_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(&r.join("a/one.txt"), 100);
+        fs::hard_link(r.join("a/one.txt"), r.join("a/two.txt")).unwrap();
+        fs::create_dir_all(r.join("b")).unwrap();
+        fs::hard_link(r.join("a/one.txt"), r.join("b/three.txt")).unwrap();
+        write(&r.join("b/own.txt"), 7);
+
+        let tree = scan(r, &Progress::default());
+        assert_eq!(size_of(&tree, r), 107);
+        let bundle = |folder: &str| {
+            let id = tree.find(&r.join(folder)).unwrap();
+            let n = tree.node(tree.node(id).children[0]);
+            (n.kind, n.size, n.linked)
+        };
+        assert_eq!(bundle("a"), (NodeKind::SmallFiles { count: 2 }, 100, 100));
+        assert_eq!(bundle("b"), (NodeKind::SmallFiles { count: 2 }, 7, 100));
+        assert_eq!((tree.links.files, tree.links.links, tree.links.bytes), (1, 2, 200));
+    }
+
+    /// A folder's own files come before its subfolders, and names compare without case.
+    #[test]
+    fn the_first_name_is_found_the_same_way_every_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        let big = 2 * SMALL_FILE_LIMIT as usize;
+        write(&r.join("z/deep/x.bin"), big);
+        for link in ["b/x.bin", "A/x.bin", "A/sub/x.bin", "c/x.bin"] {
+            fs::create_dir_all(r.join(link).parent().unwrap()).unwrap();
+            fs::hard_link(r.join("z/deep/x.bin"), r.join(link)).unwrap();
+        }
+        for _ in 0..10 {
+            let tree = scan(r, &Progress::default());
+            let sizes: Vec<u64> = ["A", "A/sub", "b", "c", "z"].iter().map(|f| size_of(&tree, &r.join(f))).collect();
+            assert_eq!(sizes, [big as u64, 0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn without_link_detection_every_name_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(&r.join("a/x.bin"), 2 * SMALL_FILE_LIMIT as usize);
+        fs::hard_link(r.join("a/x.bin"), r.join("b.bin")).unwrap();
+        let options = ScanOptions { count_links_once: false, skipped_because: Some("test"), ..ScanOptions::for_root(r) };
+        let tree = scan_with(r, &Progress::default(), options);
+        assert_eq!(size_of(&tree, r), 4 * SMALL_FILE_LIMIT);
+        assert_eq!(tree.links, LinkReport { checked: false, skipped_because: Some("test"), ..Default::default() });
+    }
+
+    /// Past the cap no hard links are looked for at all, rather than some, which would depend
+    /// on which thread reached the cap first. Empty files never count towards it.
+    #[test]
+    fn past_the_key_cap_hard_links_are_not_looked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(&r.join("a/x.txt"), 10);
+        fs::hard_link(r.join("a/x.txt"), r.join("a/y.txt")).unwrap();
+        write(&r.join("b/empty.txt"), 0);
+        write(&r.join("b/other.txt"), 5);
+
+        let under = scan_with(r, &Progress::default(), ScanOptions { max_keys: 3, ..ScanOptions::for_root(r) });
+        assert_eq!(size_of(&under, r), 15);
+        assert!(under.links.checked);
+
+        let over = scan_with(r, &Progress::default(), ScanOptions { max_keys: 2, ..ScanOptions::for_root(r) });
+        assert_eq!(size_of(&over, r), 25);
+        assert_eq!(over.links, LinkReport { skipped_because: Some("too many files"), ..Default::default() });
     }
 
     /// A cancel that arrives while one large folder is being listed stops that listing,

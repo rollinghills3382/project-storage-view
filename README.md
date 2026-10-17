@@ -25,7 +25,7 @@ npm test               # all tests: Rust unit tests, then the frontend
 
 | Part | File | What it does |
 | --- | --- | --- |
-| Scanner | `src-tauri/src/scan.rs` | Parallel directory walk (rayon) into a compact tree. Files under 1 MB are bundled per folder. Skips junctions and symlinks; counts cloud-only OneDrive files as 0 bytes. |
+| Scanner | `src-tauri/src/scan.rs` | Parallel directory walk (rayon) into a compact tree. Files under 1 MB are bundled per folder. Skips junctions and symlinks; counts only the part of a cloud (OneDrive) file stored on this PC. On NTFS each folder listing also returns file IDs, so a file with several hard links is counted once (`scan/links.rs`, `scan/winlist.rs`). |
 | App detection | `src-tauri/src/apps.rs` | Reads installed apps and their install folders from the Windows uninstall registry; assigns categories. |
 | Grouping | `src-tauri/src/grouping.rs` | Each app claims its install folder plus matching folders in `AppData` and `ProgramData`. Apps side by side under a publisher folder (`Program Files\Adobe\…`) become one block. Claimed folders are removed from where they sit, so nothing is counted twice. |
 | Commands | `src-tauri/src/lib.rs` | `list_drives`, `start_scan` (with progress events), `cancel_scan`, `get_map` (a folder with the nested levels the map draws), `get_node` (a folder and its children, for the list), `app_status`, `restart_as_admin`. |
@@ -43,6 +43,10 @@ prints the top-level blocks for a drive and every location each app was found in
 `--json ../devdata/scan.json` saves the scan so the UI can be previewed in a plain browser
 with `npm run dev` (see `src/devmock.ts`). `devdata/` is gitignored.
 
+`cargo run --release --example scan_bench -- C:\ --mode std|ids|links` times one scan and prints
+its memory peak, file counts and hard-link figures as JSON. The *Scan benchmark* workflow runs it
+on a Windows runner whenever the scanner changes and compares WinSxS with DISM's own figures.
+
 ## Design decisions
 
 - **Platform:** Windows only.
@@ -56,14 +60,18 @@ with `npm run dev` (see `src/devmock.ts`). `devdata/` is gitignored.
 - **Grouping:** by owning application, including data outside its install folder. An app opens
   into every location it occupies.
 - **View-only:** the only action is *Show in File Explorer*.
+- **Hard links count once,** under the name whose folder comes first alphabetically (a folder's
+  own files before its subfolders). Files Windows shares between `System32` and `WinSxS` count
+  in `System32`, so `WinSxS` shows what only it holds, as DISM reports it. The status bar says
+  how much this saved, and the selection bar shows how much of a folder counts elsewhere.
 
 ## Known limitations
 
 - Sizes are file lengths, not allocated clusters, so compressed and sparse files count at
   full size.
-- Hard links (common in `C:\Windows\WinSxS`) are counted once per link, so `Windows` can read
-  higher than its real footprint. When that makes the scan add up to more than Windows reports
-  as used, the legend says by how much instead of showing unreadable space.
+- Hard links are only recognized on NTFS. On other file systems (such as ReFS on a Dev Drive)
+  a file with several names counts once per name. When the scan adds up to more than Windows
+  reports as used, the legend says by how much instead of showing unreadable space.
 - Without administrator rights some folders can't be read. The status bar shows how many and
   the toolbar offers **Restart as administrator**. A few folders (such as `System Volume
   Information`) stay unreadable even then.

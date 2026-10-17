@@ -13,6 +13,8 @@ import {
   fmtCount,
   h,
   kindLabel,
+  linkedNote,
+  linkNotes,
   pct,
   scanNotes,
   usedGap,
@@ -512,7 +514,8 @@ function renderLegend() {
   // The backend counts these over the whole drive. Adding up the map's tiles instead would
   // count a "smaller items" tile as Other whatever it holds.
   for (const { category, size } of root.categories ?? []) row.append(item(CATEGORIES[category], size, catColor(category)));
-  const gap = usedGap(d, root.size, scanOf(d)?.summary.errors);
+  const summary = scanOf(d)?.summary;
+  const gap = usedGap(d, root.size, summary?.errors, summary?.links);
   if (gap?.swatch) row.append(item(gap.label, gap.bytes, "var(--muted)", gap.detail));
   row.append(item("Free", d.free, "var(--track)"));
   // An overcount is not an area of the drive, so it follows the drive's parts instead of joining them.
@@ -540,8 +543,10 @@ function renderSelectionBar() {
       {},
       `${fmtBytes(n.size)} (${fmtCount(n.size)} bytes) · ${pct(n.size, d.total)} of ${driveLetter(d.mount)}` + (parent && parent.kind !== "drive" ? ` · ${pct(n.size, parent.size)} of ${parent.name}` : ""),
     ),
-    h("span", { class: "p", title: n.locations.length > 1 ? n.locations.map((l) => `${l.path}  ${fmtBytes(l.size)}`).join("\n") : n.path }, n.path && n.path + more),
   );
+  const linked = linkedNote(n);
+  if (linked) bar.append(h("span", { title: linked.detail, tabindex: 0 }, linked.text));
+  bar.append(h("span", { class: "p", title: n.locations.length > 1 ? n.locations.map((l) => `${l.path}  ${fmtBytes(l.size)}`).join("\n") : n.path }, n.path && n.path + more));
   return bar;
 }
 
@@ -559,7 +564,7 @@ function renderStatus() {
     );
   } else if (s) {
     bar.append(h("span", {}, `${fmtCount(s.files)} files in ${fmtCount(s.dirs)} folders · scanned in ${(s.elapsed_ms / 1000).toFixed(1)} s`));
-    for (const note of scanNotes(s.errors, state.elevated)) {
+    for (const note of [...scanNotes(s.errors, state.elevated), ...linkNotes(s.links)]) {
       bar.append(h("span", { class: note.warn ? "warn note" : "note", title: note.detail, tabindex: 0 }, note.text));
     }
   } else {
