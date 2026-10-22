@@ -5,7 +5,8 @@ A Windows desktop app that shows what is taking up space on your drives.
 Pick a drive and Storage View scans it, then draws a treemap where each block's **area is
 proportional to its size on disk**. Files are grouped by the application that owns them, so
 Docker Desktop's WSL disk in `AppData` shows up under Docker Desktop, not buried in your user
-folder. Double-click any block to zoom in. A second tab lists the same data as a sortable tree.
+folder. Double-click any block to zoom in. A second tab lists the same data as a sortable tree, and
+the search box finds apps, folders and files by name across the whole drive.
 Storage View is read-only: it never changes or deletes anything.
 
 ## Running it
@@ -28,9 +29,9 @@ npm test               # all tests: Rust unit tests, then the frontend
 | Scanner | `src-tauri/src/scan.rs` | Parallel directory walk (rayon) into a compact tree. Files under 1 MB are bundled per folder. Skips junctions and symlinks; counts only the part of a cloud (OneDrive) file stored on this PC. On NTFS each folder listing also returns file IDs, so a file with several hard links is counted once (`scan/links.rs`, `scan/winlist.rs`). |
 | App detection | `src-tauri/src/apps.rs` | Reads installed apps and their install folders from the Windows uninstall registry; assigns categories. |
 | Grouping | `src-tauri/src/grouping.rs` | Each app claims its install folder plus matching folders in `AppData` and `ProgramData`. Apps side by side under a publisher folder (`Program Files\Adobe\…`) become one block. Claimed folders are removed from where they sit, so nothing is counted twice. |
-| Commands | `src-tauri/src/lib.rs` | `list_drives`, `start_scan` (with progress events), `cancel_scan`, `get_map` (a folder with the nested levels the map draws), `get_node` (a folder and its children, for the list), `app_status`, `restart_as_admin`. |
+| Commands | `src-tauri/src/lib.rs` | `list_drives`, `start_scan` (with progress events), `cancel_scan`, `get_map` (a folder with the nested levels the map draws), `get_node` (a folder and its children, for the list), `search` (`grouping/search.rs`), `app_status`, `restart_as_admin`. |
 | Elevation | `src-tauri/src/elevation.rs` | Detects administrator rights and relaunches through the UAC prompt with `--scan C:` so the new window resumes the same drive. |
-| UI | `src/main.ts`, `src/treemap.ts` | Drive buttons, Map tab (d3-hierarchy squarified layout), List tab (tree table), selection and status bars. |
+| UI | `src/main.ts`, `src/treemap.ts` | Drive buttons, Map tab (d3-hierarchy squarified layout), List tab (tree table), search results, selection and status bars. |
 
 ### Checking grouping without the UI
 
@@ -60,6 +61,11 @@ on a Windows runner whenever the scanner changes and compares WinSxS with DISM's
 - **Grouping:** by owning application, including data outside its install folder. An app opens
   into every location it occupies.
 - **View-only:** the only action is *Show in File Explorer*.
+- **Search** (Ctrl+F) matches names, ignoring case; every word typed has to appear. Results
+  replace the map or list, largest first (the 200 largest when there are more). Each result
+  carries the way to it as the view shows it, through the app that claimed it and any
+  "smaller items" tile, so double-clicking it (or Enter) opens it in the Map or List tab, and
+  clicking the search box brings the results back.
 - **Hard links count once,** under the name whose folder comes first alphabetically (a folder's
   own files before its subfolders). Files Windows shares between `System32` and `WinSxS` count
   in `System32`, so `WinSxS` shows what only it holds, as DISM reports it. The status bar says
@@ -76,6 +82,8 @@ on a Windows runner whenever the scanner changes and compares WinSxS with DISM's
   the toolbar offers **Restart as administrator**. A few folders (such as `System Volume
   Information`) stay unreadable even then.
 - A folder shows its 60 largest items; the rest are bundled into one "smaller items" entry.
+- Search can't find files under 1 MB by name, because the scan counts them together per folder
+  and keeps no names for them.
 - Under `npm run tauri dev`, restarting as administrator leaves the original window open,
   because closing it would stop the dev server the new window loads from.
 - Store (UWP/MSIX) apps aren't in the uninstall registry, so they show as folders instead of apps.

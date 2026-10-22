@@ -11,17 +11,21 @@ import {
   driveName,
   fmtBytes,
   fmtCount,
+  foundLine,
   h,
   kindLabel,
   linkedNote,
   linkNotes,
   pct,
   scanNotes,
+  SEARCH_LIMIT,
   usedGap,
   type Drive,
+  type Found,
   type ScanCancelled,
   type ScanProgress,
   type ScanSummary,
+  type SearchResults,
   type ViewNode,
 } from "./ui";
 
@@ -48,6 +52,15 @@ const state = {
   sort: { key: "size" as SortKey, dir: -1 },
   elevated: false,
   message: "",
+  search: {
+    text: "",
+    /** Whether the results take the place of the map or list. They hide when a result is
+     * shown in either, and come back when the search box is clicked. */
+    shown: false,
+    busy: false,
+    /** For the drive on screen, or null while there are none. */
+    results: null as (SearchResults & { drive: string }) | null,
+  },
 };
 
 const scans = new ScanRuns();
@@ -56,6 +69,8 @@ const scanOf = (d: Drive | null) => (d ? state.scans.get(d.mount) : undefined);
 const focus = () => state.trail[state.trail.length - 1];
 /** True when the selected drive has scan results on screen. */
 const showing = () => state.trail.length > 0;
+/** True when search results take the place of the map or list. */
+const searching = () => showing() && state.search.shown && !!state.search.text.trim();
 
 /* ---------- Data ---------- */
 
@@ -134,6 +149,9 @@ async function reveal(path: string) {
 async function showDrive(drive: Drive) {
   if (!(await nav.showDrive(drive))) return;
   hideTip();
+  // Results name items of one scan of one drive, so a new drive or a rescan searches again.
+  state.search.results = null;
+  if (state.search.text.trim()) runSearch();
   render();
 }
 
@@ -159,7 +177,7 @@ function select(node: ViewNode, chain: ViewNode[]) {
  * detail bar and the outline are rebuilt. Laying the map out again would replace every tile
  * for what is, on the map, a single outline moving. */
 function renderSelection() {
-  if (!showing()) return render();
+  if (!showing() || searching()) return render();
   if (state.tab === "map") {
     app.querySelector(".nav")?.replaceWith(renderNav());
     app.querySelector(".selbar")?.replaceWith(renderSelectionBar());
@@ -172,6 +190,7 @@ function renderSelection() {
 }
 
 function goUp() {
+  if (searching()) return;
   if (state.tab === "map") {
     if (state.trail.length < 2) return;
     const trail = state.trail.slice(0, -1);
@@ -183,14 +202,18 @@ function goUp() {
   select(chain[chain.length - 1], chain.slice(0, -1));
 }
 
-const canGoUp = () => showing() && (state.tab === "map" ? state.trail.length > 1 : !!state.selected?.chain.length);
+const canGoUp = () => showing() && !searching() && (state.tab === "map" ? state.trail.length > 1 : !!state.selected?.chain.length);
 
-/** Switches tabs and carries the selection across. */
+/** Switches tabs and carries the selection across. Leaving the search results shows the
+ * selected result in the tab: the map opens the folder that holds it. */
 async function setTab(tab: "map" | "list") {
   const sel = showing() ? state.selected : null;
   const drive = state.drive?.mount;
-  const switchTab = () => (state.tab = tab);
-  if (sel && drive && tab === "map" && sel.chain.length && !sel.chain.some((n) => n.id === focus().id)) {
+  const fromSearch = searching();
+  const switchTab = () => ((state.tab = tab), (state.search.shown = false));
+  const holder = sel?.chain[sel.chain.length - 1];
+  const outside = fromSearch ? holder?.id !== focus()?.id : !sel?.chain.some((n) => n.id === focus().id);
+  if (sel && drive && tab === "map" && holder && outside) {
     // The selection is outside the folder the map shows, so show the folder that holds it.
     return goTo(sel.chain, sel, switchTab);
   }
@@ -248,14 +271,17 @@ function renderToolbar() {
 }
 
 function renderNav() {
-  const tab = (id: "map" | "list", label: string) => h("button", { role: "tab", "aria-selected": String(state.tab === id), onclick: () => run(() => setTab(id)) }, label);
+  // Search results are neither tab; either one leaves them for the selected result.
+  const tab = (id: "map" | "list", label: string) => h("button", { role: "tab", "aria-selected": String(state.tab === id && !searching()), onclick: () => run(() => setTab(id)) }, label);
   const row = h(
     "div",
     { class: "nav" },
     h("div", { class: "tabs", role: "tablist" }, tab("map", "Map"), tab("list", "List")),
     button("Up", () => run(goUp), !canGoUp(), "Up one level (Backspace)"),
   );
-  if (state.tab === "map" && showing()) {
+  if (searching()) {
+    row.append(h("span", { class: "total" }, "Search results"));
+  } else if (state.tab === "map" && showing()) {
     const crumbs = h("nav", { class: "crumbs", "aria-label": "Location" });
     state.trail.forEach((n, i) => {
       if (i) crumbs.append(h("span", { class: "sep", "aria-hidden": "true" }, "›"));
@@ -274,8 +300,186 @@ function renderNav() {
     row.append(button("Collapse all", () => ((state.open = new Set(["root"])), render()), !showing()));
   }
   const path = showing() ? state.selected?.node.path : null;
-  row.append(h("span", { class: "grow" }), button("Show in File Explorer", () => path && reveal(path), !path));
+  searchBox.disabled = !showing();
+  searchBox.placeholder = state.drive ? `Search ${driveLetter(state.drive.mount)}` : "Search";
+  row.append(h("span", { class: "grow" }), searchBox, button("Show in File Explorer", () => path && reveal(path), !path));
   return row;
+}
+
+/* ---------- Search ---------- */
+
+/** Kept across renders, so typing is never interrupted by a redraw. */
+const searchBox = h("input", { type: "search", class: "search", "aria-label": "Search this drive by name", spellcheck: "false", autocomplete: "off" });
+const resultsHead = h("div", { class: "found" });
+const resultsList = h("div", { class: "tw", tabindex: "0", "aria-label": "Search results" });
+const resultsView = h("div", { class: "view results" }, resultsHead, resultsList);
+let searchTimer = 0;
+let searchSeq = 0;
+/** Set when the selected result should be scrolled into view after the next render. */
+let revealResult = false;
+
+/** Searches the drive on screen for what is in the box. A newer search, or another drive,
+ * makes an older answer stale, so it is dropped. */
+async function runSearch() {
+  const me = ++searchSeq;
+  const drive = state.drive?.mount;
+  const query = state.search.text.trim();
+  if (!drive || !state.scans.has(drive) || !query) {
+    state.search.busy = false;
+    state.search.results = null;
+    return render();
+  }
+  state.search.busy = true;
+  render();
+  try {
+    const r = await invoke<SearchResults>("search", { drive, query });
+    if (me !== searchSeq) return;
+    state.search.results = { ...r, drive };
+  } catch (e) {
+    if (me !== searchSeq) return;
+    state.search.results = null;
+    state.message = String(e);
+  } finally {
+    if (me === searchSeq) state.search.busy = false;
+  }
+  revealResult = true;
+  if (me === searchSeq) render();
+}
+
+searchBox.addEventListener("input", () => {
+  state.search.text = searchBox.value;
+  state.search.shown = !!searchBox.value.trim();
+  clearTimeout(searchTimer);
+  // Every keystroke would search the whole drive, so wait for a pause in typing.
+  searchTimer = window.setTimeout(runSearch, 200);
+  render();
+});
+/** Set while a redraw gives the box its focus back, which is not the user returning to it. */
+let restoringFocus = false;
+// Clicking back into the box brings the last results back.
+for (const type of ["focus", "click"]) {
+  searchBox.addEventListener(type, () => {
+    if (restoringFocus || state.search.shown || !state.search.text.trim()) return;
+    state.search.shown = true;
+    render();
+  });
+}
+searchBox.addEventListener("keydown", (e) => {
+  const found = currentResults();
+  const at = found.findIndex((f) => f.node.id === state.selected?.node.id);
+  if (e.key === "Escape") {
+    // The box clears itself on Escape too; this also puts the map or list back.
+    clearTimeout(searchTimer);
+    searchSeq++;
+    state.search = { text: "", shown: false, busy: false, results: null };
+    searchBox.value = "";
+    render();
+  } else if (e.key === "ArrowDown" && found.length) {
+    pickResult(Math.max(at, 0));
+    resultsList.focus();
+  } else if (e.key === "Enter" && found.length) {
+    run(() => showResult(found[Math.max(at, 0)]));
+  } else return;
+  e.preventDefault();
+});
+
+/** Results for the drive on screen. */
+const currentResults = (): Found[] => (state.search.results?.drive === state.drive?.mount ? (state.search.results?.found ?? []) : []);
+
+function pickResult(i: number) {
+  const f = currentResults()[i];
+  if (!f) return;
+  revealResult = true;
+  select(f.node, f.chain);
+}
+
+/** Leaves the results for the selected one, in the tab that was showing before. */
+function showResult(f: Found) {
+  state.selected = { node: f.node, chain: f.chain };
+  searchBox.blur();
+  return setTab(state.tab);
+}
+
+resultsList.addEventListener("keydown", (e) => {
+  const found = currentResults();
+  const i = found.findIndex((f) => f.node.id === state.selected?.node.id);
+  switch (e.key) {
+    case "ArrowDown":
+      pickResult(Math.min(i + 1, found.length - 1));
+      break;
+    case "ArrowUp":
+      if (i <= 0) searchBox.focus();
+      else pickResult(i - 1);
+      break;
+    case "Enter":
+      if (found[i]) run(() => showResult(found[i]));
+      break;
+    case "Escape":
+      searchBox.focus();
+      break;
+    default:
+      return;
+  }
+  e.preventDefault();
+  // Handled here, so the window's own Escape and Backspace don't act on it too.
+  e.stopPropagation();
+});
+
+const RESULT_COLUMNS: { id: string; label: string; width?: string; num?: boolean }[] = [
+  { id: "name", label: "Name" },
+  { id: "size", label: "Size", width: "84px", num: true },
+  { id: "drive", label: "% of drive", width: "76px", num: true },
+  { id: "type", label: "Type", width: "132px" },
+  { id: "category", label: "Category", width: "112px" },
+  { id: "path", label: "Location", width: "40%" },
+];
+
+function resultCell(id: string, n: ViewNode) {
+  switch (id) {
+    case "name":
+      return h("td", { title: n.name }, h("div", { class: "name" }, h("i", { class: "sw", style: `background:${catColor(n.category)}` }), h("span", {}, n.name)));
+    case "size":
+      return h("td", { class: "num", title: `${fmtCount(n.size)} bytes` }, fmtBytes(n.size));
+    case "drive":
+      return h("td", { class: "num" }, pct(n.size, state.drive!.total));
+    case "type":
+      return h("td", { class: "dim" }, kindLabel(n));
+    case "category":
+      return h("td", { class: "dim" }, n.category ? CATEGORIES[n.category] : "");
+    default:
+      return h("td", { class: "dim", title: n.path ?? "" }, n.path ?? "");
+  }
+}
+
+function drawResults() {
+  const r = state.search.results?.drive === state.drive?.mount ? state.search.results : null;
+  const stale = r && r.query !== state.search.text.trim();
+  resultsHead.replaceChildren(
+    h("span", {}, !r ? "Searching…" : foundLine(r) + (stale || state.search.busy ? " · searching…" : "")),
+    h("span", { class: "dim" }, SEARCH_LIMIT),
+  );
+  const rows = (r?.found ?? []).map((f) =>
+    h(
+      "tr",
+      {
+        class: state.selected?.node.id === f.node.id ? "sel" : "",
+        title: "Double-click to show it in the " + (state.tab === "map" ? "map" : "list"),
+        onclick: (e) => ((e as MouseEvent).detail >= 2 ? run(() => showResult(f)) : select(f.node, f.chain)),
+      },
+      ...RESULT_COLUMNS.map((c) => resultCell(c.id, f.node)),
+    ),
+  );
+  resultsList.replaceChildren(
+    h(
+      "table",
+      { class: "grid" },
+      h("colgroup", {}, ...RESULT_COLUMNS.map((c) => h("col", { style: c.width ? `width:${c.width}` : "" }))),
+      h("thead", {}, h("tr", {}, ...RESULT_COLUMNS.map((c) => h("th", { class: c.num ? "num" : "" }, c.label)))),
+      h("tbody", {}, ...rows),
+    ),
+  );
+  if (revealResult) resultsList.querySelector("tr.sel")?.scrollIntoView({ block: "nearest" });
+  revealResult = false;
 }
 
 /* ---------- Map ---------- */
@@ -605,24 +809,41 @@ function renderView() {
 }
 
 function render() {
-  const view = renderView();
-  // Re-inserting the list drops its scroll position and keyboard focus, so put both back.
-  const hadFocus = document.activeElement === list;
+  const view = searching() ? resultsView : renderView();
+  // Re-inserting an element drops its scroll position, keyboard focus and caret, so put them back.
+  const focused = document.activeElement;
   const scroll = list.scrollTop;
+  const resultsScroll = resultsList.scrollTop;
+  const caret = [searchBox.selectionStart, searchBox.selectionEnd] as const;
   app.replaceChildren(renderToolbar(), renderNav(), view, ...(showing() ? [renderLegend(), renderSelectionBar()] : []), renderStatus());
   if (view === mapView) drawMap();
   else if (view === list) {
     list.scrollTop = scroll;
     drawList();
-    if (hadFocus) list.focus();
+  } else if (view === resultsView) {
+    resultsList.scrollTop = resultsScroll;
+    drawResults();
   }
+  if (focused === searchBox && !searchBox.disabled) {
+    restoringFocus = true;
+    searchBox.focus();
+    restoringFocus = false;
+    searchBox.setSelectionRange(caret[0], caret[1]);
+  } else if ((focused === list || focused === resultsList) && focused.isConnected) (focused as HTMLElement).focus();
   updateProgress();
 }
 
 /* ---------- Boot ---------- */
 
 document.addEventListener("keydown", (e) => {
-  if (!showing() || e.target instanceof HTMLInputElement) return;
+  if (!showing()) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    searchBox.focus();
+    searchBox.select();
+    return;
+  }
+  if (e.target instanceof HTMLInputElement) return;
   if (e.key === "Backspace") run(goUp);
   else if (e.key === "Escape" && state.selected) {
     state.selected = null;
