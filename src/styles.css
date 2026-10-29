@@ -141,6 +141,7 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; table-la
 .legend span { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
 .legend b { color: var(--fg); font-weight: 400; }
 .selbar b { font-weight: 600; }
+.selbar .why { color: var(--muted); cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
 .selbar .p { overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-family: var(--f-mono); }
 .status { background: var(--panel); color: var(--muted); }
 .status .warn { color: var(--warn); }
