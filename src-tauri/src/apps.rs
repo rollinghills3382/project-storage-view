@@ -8,8 +8,19 @@ pub struct InstalledApp {
     pub name: String,
     pub publisher: String,
     pub location: PathBuf,
+    /// Which value of the app's uninstall entry gave `location`.
+    pub from: LocationSource,
     /// Registered by Steam ("Steam App 123" keys).
     pub steam: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocationSource {
+    /// `InstallLocation`.
+    InstallLocation,
+    /// No usable `InstallLocation`, so the folder of the `DisplayIcon` executable.
+    DisplayIcon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -191,8 +202,12 @@ pub fn installed_apps() -> Vec<InstalledApp> {
                 .ok()
                 .and_then(|s| clean_path(&s))
                 .filter(|p| is_usable_location(p))
-                .or_else(|| k.get_value::<String, _>("DisplayIcon").ok().and_then(|s| exe_dir(&s)).filter(|p| is_usable_location(p)));
-            let Some(location) = location else { continue };
+                .map(|p| (p, LocationSource::InstallLocation))
+                .or_else(|| {
+                    let icon = k.get_value::<String, _>("DisplayIcon").ok().and_then(|s| exe_dir(&s)).filter(|p| is_usable_location(p));
+                    icon.map(|p| (p, LocationSource::DisplayIcon))
+                });
+            let Some((location, from)) = location else { continue };
             if !location.is_dir() || !seen.insert(location.to_string_lossy().to_lowercase()) {
                 continue;
             }
@@ -200,6 +215,7 @@ pub fn installed_apps() -> Vec<InstalledApp> {
                 name: name.trim().to_string(),
                 publisher: k.get_value::<String, _>("Publisher").unwrap_or_default().trim().to_string(),
                 location,
+                from,
                 steam: sub.starts_with("Steam App "),
             });
         }

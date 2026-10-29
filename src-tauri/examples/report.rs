@@ -43,8 +43,10 @@ fn main() {
     for c in top.children.unwrap_or_default().iter().take(40) {
         let cat = c.category.map(|c| format!("{c:?}")).unwrap_or_default();
         println!("{}  {:<12} {:<6} {}", gb(c.size), cat, c.kind, c.name);
-        for l in c.locations.iter().filter(|_| c.locations.len() > 1) {
-            println!("{}  {:<12} {:<6}   └ {}", gb(l.size), "", "", l.path);
+        // Every location with the rule that claimed it, so a wrong match can be traced.
+        for l in &c.locations {
+            let why = l.claim.as_ref().map(|w| serde_json::to_string(w).unwrap_or_default()).unwrap_or_default();
+            println!("{}  {:<12} {:<6}   └ {}  {}", gb(l.size), "", "", l.path, why);
         }
     }
 
