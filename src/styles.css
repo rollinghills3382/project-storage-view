@@ -90,6 +90,8 @@ button { font: inherit; color: inherit; }
 .crumbs button:hover { background: var(--hover); }
 .crumbs button[aria-current="page"] { font-weight: 600; cursor: default; background: none; }
 .crumbs .sep { color: var(--muted); }
+.search { flex: 0 1 220px; min-width: 120px; height: 22px; padding: 0 6px; border: 1px solid var(--line); border-radius: 2px; background: var(--bg); color: var(--fg); font: inherit; }
+.search:disabled { opacity: 0.6; }
 .nav .total { padding: 0 6px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* Map: flat tiles in their category color, 1px gaps, a darker name strip on blocks that show their contents */
@@ -128,6 +130,11 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; table-la
 .arrow.none { visibility: hidden; }
 .pc { display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 6px; align-items: center; font-variant-numeric: tabular-nums; text-align: right; }
 .pc .meter { height: 10px; }
+
+/* Search results: a line saying what was found above a list like the List tab's */
+.results { grid-template-rows: auto minmax(0, 1fr); }
+.results .found { display: flex; gap: 16px; padding: 3px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
+.results .found .dim { overflow: hidden; text-overflow: ellipsis; }
 
 /* Legend, selection, status */
 .legend, .selbar, .status { display: flex; align-items: center; gap: 4px 16px; min-height: 24px; padding: 2px 8px; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }

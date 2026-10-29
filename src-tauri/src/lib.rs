@@ -239,8 +239,12 @@ fn cancel_scan(state: State<AppState>, scan: Option<u64>) {
     state.cancel(scan);
 }
 
+fn stored(state: &AppState, drive: &str) -> Result<Arc<View>, String> {
+    state.views.lock().unwrap().get(drive).cloned().ok_or_else(|| format!("{drive} has not been scanned yet."))
+}
+
 fn lookup(state: &State<AppState>, drive: &str, id: &str) -> Result<(Arc<View>, Id), String> {
-    let view = state.views.lock().unwrap().get(drive).cloned().ok_or_else(|| format!("{drive} has not been scanned yet."))?;
+    let view = stored(state, drive)?;
     let id = Id::parse(id).filter(|i| view.contains(i.clone())).ok_or_else(|| format!("Unknown item {id}."))?;
     Ok((view, id))
 }
@@ -259,12 +263,20 @@ fn get_map(state: State<AppState>, drive: String, id: String) -> Result<ViewNode
     Ok(view.map(id))
 }
 
+/// Apps, folders and files on a scanned drive whose names contain every word of `query`,
+/// largest first, each with the way to it. Runs off the main thread: it reads every name.
+#[tauri::command]
+async fn search(state: State<'_, AppState>, drive: String, query: String) -> Result<grouping::SearchResults, String> {
+    let view = stored(&state, &drive)?;
+    tauri::async_runtime::spawn_blocking(move || view.search(&query)).await.map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![app_status, restart_as_admin, list_drives, start_scan, cancel_scan, get_node, get_map])
+        .invoke_handler(tauri::generate_handler![app_status, restart_as_admin, list_drives, start_scan, cancel_scan, get_node, get_map, search])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

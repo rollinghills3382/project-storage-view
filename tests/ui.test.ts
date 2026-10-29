@@ -12,6 +12,7 @@ import {
   catColor,
   fmtBytes,
   fmtCount,
+  foundLine,
   linkedNote,
   linkNotes,
   pct,
@@ -227,4 +228,12 @@ test("linkedNote explains bytes counted in another folder, and only when there a
   const note = linkedNote({ linked: 5 * GB })!;
   assert.equal(note.text, "5.00 GB in hard links counted elsewhere");
   assert.match(note.detail, /counted there, not in this total/);
+});
+
+test("foundLine says how many matched and when only the largest are listed", () => {
+  const found = (n: number) => Array.from({ length: n }, () => ({}) as never);
+  assert.equal(foundLine({ query: "vhdx", found: [], total: 0 }), "Nothing matches \u201cvhdx\u201d");
+  assert.equal(foundLine({ query: "vhdx", found: found(1), total: 1 }), "1 match, largest first");
+  assert.equal(foundLine({ query: "log", found: found(12), total: 12 }), "12 matches, largest first");
+  assert.equal(foundLine({ query: "log", found: found(200), total: 4100 }), `${(4100).toLocaleString()} matches, showing the largest 200`);
 });

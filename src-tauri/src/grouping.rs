@@ -10,6 +10,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+mod search;
+pub use search::{Found, SearchResults};
+
 const UNOWNED: u32 = u32::MAX;
 /// Children returned for the level being viewed, and for each level nested inside it.
 const LIMIT_TOP: usize = 60;

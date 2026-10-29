@@ -39,6 +39,31 @@ export interface ViewNode {
   linked?: number;
 }
 
+/** A search match and what it sits inside, from the drive down to its parent, as the list
+ * and the map show it. */
+export interface Found {
+  node: ViewNode;
+  chain: ViewNode[];
+}
+
+export interface SearchResults {
+  query: string;
+  /** The largest matches. */
+  found: Found[];
+  /** Every match, including those past `found`. */
+  total: number;
+}
+
+/** The line above search results. */
+export function foundLine(r: Pick<SearchResults, "query" | "found" | "total">): string {
+  if (r.total === 0) return `Nothing matches “${r.query}”`;
+  const matches = r.total === 1 ? "1 match" : `${fmtCount(r.total)} matches`;
+  return r.total > r.found.length ? `${matches}, showing the largest ${fmtCount(r.found.length)}` : `${matches}, largest first`;
+}
+
+/** Why some files never show up in search results. */
+export const SEARCH_LIMIT = "Files under 1 MB are counted together per folder, so they can't be found by name.";
+
 /** Why a path could not be read. Only `denied` is something administrator rights can fix. */
 export type ScanProblem = "denied" | "vanished" | "open_dir" | "list_dir" | "file_type" | "metadata" | "cloud_size";
 

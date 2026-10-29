@@ -2,7 +2,7 @@
 // `cargo run --release --example report -- C:\ --json ../devdata/scan.json`.
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Drive, ScanSummary, ViewNode } from "./ui";
+import type { Drive, Found, ScanSummary, ViewNode } from "./ui";
 
 interface Dump {
   drive: Drive;
@@ -39,6 +39,19 @@ export async function install() {
   };
   Object.values(dump.maps).forEach(index);
 
+  // Search only knows what was saved: everything reachable from the drive, with the way to it.
+  const findable: Found[] = [];
+  const seen = new Set<string>();
+  const bare = (n: ViewNode): ViewNode => ({ ...n, children: null });
+  const walk = (n: ViewNode, chain: ViewNode[]) => {
+    if (seen.has(n.id)) return;
+    seen.add(n.id);
+    if (n.kind !== "drive" && n.kind !== "more" && n.kind !== "files") findable.push({ node: bare(n), chain });
+    const kids = n.children ?? dump.maps[n.id]?.children ?? dump.nodes[n.id]?.children ?? [];
+    for (const c of kids) walk(c, [...chain, bare(n)]);
+  };
+  walk(dump.maps.root, []);
+
   let lastScan = 0;
   mockIPC(
     (cmd, args) => {
@@ -60,6 +73,11 @@ export async function install() {
             await emit("scan-done", { ...dump.summary, scan });
           });
           return scan;
+        }
+        case "search": {
+          const words = a.query.toLowerCase().split(/\s+/).filter(Boolean);
+          const hits = findable.filter((f) => words.every((w) => f.node.name.toLowerCase().includes(w))).sort((x, y) => y.node.size - x.node.size);
+          return { query: a.query, found: hits.slice(0, 200), total: hits.length };
         }
         case "get_map":
         case "get_node": {
