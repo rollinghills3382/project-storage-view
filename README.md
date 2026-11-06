@@ -40,7 +40,8 @@ cd src-tauri
 cargo run --release --example report -- C:\
 ```
 
-prints the top-level blocks for a drive and every location each app was found in. Adding
+prints the top-level blocks for a drive and every location each app was found in, with the rule
+that claimed it. Adding
 `--json ../devdata/scan.json` saves the scan so the UI can be previewed in a plain browser
 with `npm run dev` (see `src/devmock.ts`). `devdata/` is gitignored.
 
@@ -59,7 +60,10 @@ on a Windows runner whenever the scanner changes and compares WinSxS with DISM's
 - **Look:** plain desktop-utility chrome. System font at 12px, square corners, 1px rules, no
   cards, shadows or popups. Color is reserved for the map and its legend.
 - **Grouping:** by owning application, including data outside its install folder. An app opens
-  into every location it occupies.
+  into every location it occupies. Selecting an app, or one of its folders, shows *Why here* in
+  the selection bar; hovering it names the rule that claimed each folder (its install folder,
+  the publisher folder it is installed in, or a data folder whose name matches it) and the name
+  that matched.
 - **View-only:** the only action is *Show in File Explorer*.
 - **Search** (Ctrl+F) matches names, ignoring case; every word typed has to appear. Results
   replace the map or list, largest first (the 200 largest when there are more). Each result

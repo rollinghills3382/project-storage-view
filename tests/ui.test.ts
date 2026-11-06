@@ -8,7 +8,9 @@ import { test } from "node:test";
 
 import { canOpen } from "../src/treemap.ts";
 import {
+  appClaims,
   CATEGORIES,
+  claimNote,
   catColor,
   fmtBytes,
   fmtCount,
@@ -236,4 +238,45 @@ test("foundLine says how many matched and when only the largest are listed", () 
   assert.equal(foundLine({ query: "vhdx", found: found(1), total: 1 }), "1 match, largest first");
   assert.equal(foundLine({ query: "log", found: found(12), total: 12 }), "12 matches, largest first");
   assert.equal(foundLine({ query: "log", found: found(200), total: 4100 }), `${(4100).toLocaleString()} matches, showing the largest 200`);
+});
+
+test("claimNote says which rule put a folder under its app", () => {
+  assert.equal(claimNote({ rule: "install", app: "Docker Desktop", from: "install_location" }).text, "Why here: its install folder");
+  assert.match(claimNote({ rule: "install", app: "Spotify", from: "display_icon" }).detail, /no install folder for Spotify/);
+  const one = claimNote({ rule: "publisher", publisher: "Docker Inc.", apps: ["Docker Desktop"] });
+  assert.equal(one.text, "Why here: publisher folder of Docker Desktop");
+  assert.match(one.detail, /Everything in this folder is counted with Docker Desktop/);
+  const suite = claimNote({ rule: "publisher", publisher: "Adobe Inc.", apps: ["Photoshop", "Premiere Pro", "Illustrator"] });
+  assert.equal(suite.text, "Why here: publisher folder of 3 apps");
+  assert.match(suite.detail, /Photoshop, Premiere Pro and Illustrator side by side/);
+  const deeper = claimNote({
+    rule: "named",
+    name: "Chrome",
+    matched: { kind: "install_folder", name: "Chrome" },
+    container: "AppData\\Local",
+    inside: "Google",
+  });
+  assert.equal(deeper.text, "Why here: named like its install folder");
+  assert.equal(
+    deeper.detail,
+    "\u201cChrome\u201d in AppData\\Local\\Google matches its install folder, \u201cChrome\u201d, and no other installed app (ignoring case, spaces and punctuation). " +
+      "\u201cGoogle\u201d itself matches no single app, so the folders inside it were checked.",
+  );
+});
+
+test("appClaims explains one folder directly and several folder by folder", () => {
+  const install = { rule: "install", app: "Docker Desktop", from: "install_location" } as const;
+  const named = { rule: "named", name: "Docker", matched: { kind: "app_name", name: "Docker Desktop" }, container: "AppData\\Local", inside: null } as const;
+  assert.equal(appClaims({ locations: [{ path: "C:\\Docker", size: 1, claim: install }] })?.text, "Why here: its install folder");
+  const both = appClaims({
+    locations: [
+      { path: "C:\\Program Files\\Docker", size: 2, claim: install },
+      { path: "C:\\Users\\me\\AppData\\Local\\Docker", size: 1, claim: named },
+    ],
+  });
+  assert.equal(both?.text, "Why these 2 folders");
+  assert.equal(both?.detail.split("\n\n").length, 2);
+  assert.ok(both?.detail.startsWith("C:\\Program Files\\Docker\nWindows' list"));
+  // Preview data saved before reasons existed has none to show.
+  assert.equal(appClaims({ locations: [{ path: "C:\\Docker", size: 1 }] }), null);
 });

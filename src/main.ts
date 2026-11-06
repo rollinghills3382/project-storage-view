@@ -5,8 +5,10 @@ import { navigator, type Located } from "./nav";
 import { isNewer, ScanRuns } from "./scanrun";
 import { canOpen, createTreemap } from "./treemap";
 import {
+  appClaims,
   CATEGORIES,
   catColor,
+  claimNote,
   driveLetter,
   driveName,
   fmtBytes,
@@ -750,6 +752,9 @@ function renderSelectionBar() {
   );
   const linked = linkedNote(n);
   if (linked) bar.append(h("span", { title: linked.detail, tabindex: 0 }, linked.text));
+  // Why an app's folder is shown under the app, not where it sits on disk.
+  const why = n.claim ? claimNote(n.claim) : n.kind === "app" ? appClaims(n) : null;
+  if (why) bar.append(h("span", { class: "why", title: why.detail, tabindex: 0 }, why.text));
   bar.append(h("span", { class: "p", title: n.locations.length > 1 ? n.locations.map((l) => `${l.path}  ${fmtBytes(l.size)}`).join("\n") : n.path }, n.path && n.path + more));
   return bar;
 }

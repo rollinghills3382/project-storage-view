@@ -21,6 +21,18 @@ export interface Drive {
   file_system: string;
 }
 
+/** Why a folder is shown under an app instead of where it sits on disk. */
+export type Claim =
+  | { rule: "install"; app: string; from: "install_location" | "display_icon" }
+  | { rule: "publisher"; publisher: string; apps: string[] }
+  | {
+      rule: "named";
+      name: string;
+      matched: { kind: "app_name" | "install_folder" | "publisher" | "publisher_folder"; name: string };
+      container: string;
+      inside: string | null;
+    };
+
 export interface ViewNode {
   id: string;
   name: string;
@@ -28,7 +40,8 @@ export interface ViewNode {
   kind: "drive" | "app" | "folder" | "file" | "files" | "more";
   category: Category | null;
   path: string | null;
-  locations: { path: string; size: number }[];
+  /** `claim` is missing from preview data saved by older builds. */
+  locations: { path: string; size: number; claim?: Claim | null }[];
   has_children: boolean;
   children: ViewNode[] | null;
   /** Drive only: every scanned byte by category, largest first, counted before the
@@ -37,6 +50,8 @@ export interface ViewNode {
   /** Bytes of hard links in here that are counted under another name, outside `size`.
    * Left out when there are none. */
   linked?: number;
+  /** A folder an app claimed: why it is shown under the app. */
+  claim?: Claim;
 }
 
 /** A search match and what it sits inside, from the drive down to its parent, as the list
@@ -168,6 +183,68 @@ export function linkedNote(n: Pick<ViewNode, "linked">): ScanNote | null {
     text: `${fmtBytes(n.linked)} in hard links counted elsewhere`,
     warn: false,
     detail: "Files in here that also have a name in a folder that comes earlier alphabetically. Their space is counted there, not in this total.",
+  };
+}
+
+/** "A, B and C". */
+function listed(names: string[]): string {
+  return names.length < 2 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+const MATCHED = {
+  app_name: ["Why here: named after the app", "the app's name"],
+  install_folder: ["Why here: named like its install folder", "its install folder"],
+  publisher: ["Why here: named after its publisher", "its publisher"],
+  publisher_folder: ["Why here: named like its publisher's folder", "its publisher's folder"],
+} as const;
+
+/** What the selection bar says about why a folder an app claimed is shown under it. */
+export function claimNote(c: Claim): ScanNote {
+  switch (c.rule) {
+    case "install":
+      return c.from === "install_location"
+        ? { text: "Why here: its install folder", warn: false, detail: `Windows' list of installed apps gives this as the install folder of ${c.app}.` }
+        : {
+            text: "Why here: folder of its program",
+            warn: false,
+            detail: `Windows' list of installed apps gives no install folder for ${c.app}, so the folder of the program its icon comes from is used.`,
+          };
+    case "publisher":
+      return c.apps.length === 1
+        ? {
+            text: `Why here: publisher folder of ${c.apps[0]}`,
+            warn: false,
+            detail: `${c.apps[0]} is installed in a folder inside this one, which is named after its publisher, ${c.publisher}. Everything in this folder is counted with ${c.apps[0]}.`,
+          }
+        : {
+            text: `Why here: publisher folder of ${c.apps.length} apps`,
+            warn: false,
+            detail: `${c.publisher} installs ${listed(c.apps)} side by side in this folder, so they are shown together as one block.`,
+          };
+    case "named": {
+      const [text, what] = MATCHED[c.matched.kind];
+      const where = c.inside ? `${c.container}\\${c.inside}` : c.container;
+      return {
+        text,
+        warn: false,
+        detail:
+          `“${c.name}” in ${where} matches ${what}, “${c.matched.name}”, and no other installed app (ignoring case, spaces and punctuation).` +
+          (c.inside ? ` “${c.inside}” itself matches no single app, so the folders inside it were checked.` : ""),
+      };
+    }
+  }
+}
+
+/** Why an app's folders are shown under it, for the selection bar: the reason itself for an
+ * app in one folder, or each folder with its reason for an app in several. */
+export function appClaims(n: Pick<ViewNode, "locations">): ScanNote | null {
+  const claimed = n.locations.filter((l) => l.claim);
+  if (!claimed.length) return null;
+  if (n.locations.length === 1) return claimNote(claimed[0].claim!);
+  return {
+    text: `Why these ${n.locations.length} folders`,
+    warn: false,
+    detail: claimed.map((l) => `${l.path}\n${claimNote(l.claim!).detail}`).join("\n\n"),
   };
 }
 

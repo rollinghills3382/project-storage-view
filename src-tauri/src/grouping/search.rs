@@ -185,7 +185,7 @@ mod tests {
     }
 
     fn app(root: &Path, name: &str, publisher: &str, rel: &str) -> InstalledApp {
-        InstalledApp { name: name.into(), publisher: publisher.into(), location: root.join(rel), steam: false }
+        InstalledApp { name: name.into(), publisher: publisher.into(), location: root.join(rel), from: crate::apps::LocationSource::InstallLocation, steam: false }
     }
 
     fn names(v: &[ViewNode]) -> Vec<&str> {

@@ -4,7 +4,7 @@
 //! `ProgramData` whose names match it. A claimed folder is removed from wherever it sits
 //! in the folder tree and shown under its app instead, so nothing is counted twice.
 
-use crate::apps::{self, Category, InstalledApp};
+use crate::apps::{self, Category, InstalledApp, LocationSource};
 use crate::scan::{NodeKind, Tree};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -28,7 +28,37 @@ pub struct Group {
     pub category: Category,
     /// Claimed folders, largest first.
     pub locations: Vec<u32>,
+    /// Why each of `locations` was claimed.
+    pub claims: HashMap<u32, Claim>,
     pub size: u64,
+}
+
+/// Why a folder is shown under an app rather than where it sits on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "rule", rename_all = "snake_case")]
+pub enum Claim {
+    /// Windows' list of installed apps gives this folder for `app`.
+    Install { app: String, from: LocationSource },
+    /// The folder named after `publisher` that holds `apps`, each installed in a folder of its own.
+    Publisher { publisher: String, apps: Vec<String> },
+    /// A folder in `container` (`AppData\Local`, `ProgramData`, ...) whose name matches one app
+    /// and no other. `inside` is the folder between them when the match was one level down,
+    /// as in `AppData\Local\Google\Chrome`.
+    Named { name: String, matched: Matched, container: String, inside: Option<String> },
+}
+
+/// What a data folder's name matched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "name", rename_all = "snake_case")]
+pub enum Matched {
+    /// The app's name, without version.
+    AppName(String),
+    /// The name of its install folder.
+    InstallFolder(String),
+    /// Its publisher.
+    Publisher(String),
+    /// The publisher folder its apps are installed in.
+    PublisherFolder(String),
 }
 
 pub struct View {
@@ -85,6 +115,7 @@ impl Id {
 pub struct Location {
     pub path: String,
     pub size: u64,
+    pub claim: Option<Claim>,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +137,9 @@ pub struct ViewNode {
     /// Bytes of hard links in here that are counted under another name, outside `size`.
     #[serde(skip_serializing_if = "is_zero")]
     pub linked: u64,
+    /// A folder an app claimed: why it is shown under the app.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim: Option<Claim>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -122,9 +156,13 @@ struct Candidate {
     name: String,
     suite_name: Option<String>,
     category: Category,
-    apps: usize,
+    /// Display names of the apps installed at `path`.
+    apps: Vec<String>,
     path: PathBuf,
-    tokens: Vec<String>,
+    /// Why `path` is the app's.
+    claim: Claim,
+    /// Normalized names a data folder can match, and where each came from.
+    tokens: Vec<(String, Matched)>,
 }
 
 /// One candidate per app, except apps installed side by side under a publisher folder
@@ -139,20 +177,30 @@ fn candidates(apps: &[InstalledApp]) -> Vec<Candidate> {
             let leaf = dir.file_name().map(|f| apps::norm(&f.to_string_lossy())).unwrap_or_default();
             !apps::is_generic(&publisher) && !apps::is_generic(&leaf) && leaf.starts_with(&publisher) && apps::is_usable_location(dir)
         });
-        let (path, suite_name, mut tokens) = match suite {
+        let display = apps::display_name(&app.name);
+        let (path, suite_name, claim, mut tokens) = match suite {
             Some(dir) => {
                 let leaf = dir.file_name().unwrap().to_string_lossy().into_owned();
-                let tokens = vec![publisher.clone(), apps::norm(&leaf)];
-                (dir.to_path_buf(), Some(leaf), tokens)
+                let publisher_name = app.publisher.trim().to_string();
+                let tokens = vec![(publisher.clone(), Matched::Publisher(publisher_name.clone())), (apps::norm(&leaf), Matched::PublisherFolder(leaf.clone()))];
+                (dir.to_path_buf(), Some(leaf), Claim::Publisher { publisher: publisher_name, apps: Vec::new() }, tokens)
             }
-            None => (app.location.clone(), None, apps::location_token(&app.location).into_iter().collect()),
+            None => {
+                let folder = |t: String| {
+                    // The folder the token was read from, as it is spelled on disk.
+                    let spelled = app.location.iter().rev().map(|c| c.to_string_lossy().into_owned()).find(|c| apps::norm(c) == t).unwrap_or_else(|| t.clone());
+                    (t, Matched::InstallFolder(spelled))
+                };
+                let tokens = apps::location_token(&app.location).map(folder).into_iter().collect();
+                (app.location.clone(), None, Claim::Install { app: display.clone(), from: app.from }, tokens)
+            }
         };
-        tokens.push(apps::base_name(&app.name));
+        tokens.push((apps::base_name(&app.name), Matched::AppName(display.clone())));
         let key = path.to_string_lossy().to_lowercase();
         match by_path.get(&key) {
             Some(&i) => {
                 let c = &mut out[i];
-                c.apps += 1;
+                c.apps.push(display);
                 c.tokens.extend(tokens);
                 if c.category != category {
                     c.category = Category::Productivity;
@@ -160,20 +208,24 @@ fn candidates(apps: &[InstalledApp]) -> Vec<Candidate> {
             }
             None => {
                 by_path.insert(key, out.len());
-                out.push(Candidate { name: apps::display_name(&app.name), suite_name, category, apps: 1, path, tokens });
+                out.push(Candidate { name: display.clone(), suite_name, category, apps: vec![display], path, claim, tokens });
             }
         }
     }
     for c in &mut out {
         // A publisher folder holding a single app is just that app.
-        if c.apps > 1 {
+        if c.apps.len() > 1 {
             if let Some(suite) = c.suite_name.take() {
                 c.name = suite;
             }
         }
-        c.tokens.retain(|t| !apps::is_generic(t));
-        c.tokens.sort();
-        c.tokens.dedup();
+        if let Claim::Publisher { apps, .. } = &mut c.claim {
+            apps.clone_from(&c.apps);
+        }
+        c.tokens.retain(|(t, _)| !apps::is_generic(t));
+        // The first source of each token explains it.
+        let mut seen = std::collections::HashSet::new();
+        c.tokens.retain(|(t, _)| seen.insert(t.clone()));
     }
     out
 }
@@ -184,40 +236,48 @@ impl View {
         let mut owner = vec![UNOWNED; tree.nodes.len()];
         let mut groups: Vec<Group> = cands
             .iter()
-            .map(|c| Group { name: c.name.clone(), category: c.category, locations: Vec::new(), size: 0 })
+            .map(|c| Group { name: c.name.clone(), category: c.category, locations: Vec::new(), claims: HashMap::new(), size: 0 })
             .collect();
 
         for (g, c) in cands.iter().enumerate() {
             if let Some(id) = tree.find(&c.path) {
-                claim(&tree, &mut owner, &mut groups, id, g as u32);
+                claim(&tree, &mut owner, &mut groups, id, g as u32, c.claim.clone());
             }
         }
 
         // Folders named after an app in AppData and ProgramData belong to that app.
-        let mut tokens: HashMap<&str, Vec<u32>> = HashMap::new();
+        let mut tokens: HashMap<&str, Vec<(u32, &Matched)>> = HashMap::new();
         for (g, c) in cands.iter().enumerate() {
-            for t in &c.tokens {
-                tokens.entry(t.as_str()).or_default().push(g as u32);
+            for (t, matched) in &c.tokens {
+                tokens.entry(t.as_str()).or_default().push((g as u32, matched));
             }
         }
         let unique = |name: &str| match tokens.get(apps::norm(name).as_str()).map(Vec::as_slice) {
-            Some([g]) => Some(*g),
+            Some([(g, matched)]) => Some((*g, (*matched).clone())),
             _ => None,
         };
         for container in data_folders(&tree) {
+            let place = short_location(&tree.path(container).display().to_string());
+            let named = |node: u32, matched: Matched, inside: Option<String>| Claim::Named {
+                name: tree.node(node).name.to_string(),
+                matched,
+                container: place.clone(),
+                inside,
+            };
             for &child in &tree.node(container).children {
                 if tree.node(child).kind != NodeKind::Dir || owner[child as usize] != UNOWNED {
                     continue;
                 }
-                if let Some(g) = unique(&tree.node(child).name) {
-                    claim(&tree, &mut owner, &mut groups, child, g);
+                if let Some((g, matched)) = unique(&tree.node(child).name) {
+                    claim(&tree, &mut owner, &mut groups, child, g, named(child, matched, None));
                     continue;
                 }
                 // Publisher folders: AppData\Local\Google\Chrome.
                 for &grandchild in &tree.node(child).children {
                     if tree.node(grandchild).kind == NodeKind::Dir && owner[grandchild as usize] == UNOWNED {
-                        if let Some(g) = unique(&tree.node(grandchild).name) {
-                            claim(&tree, &mut owner, &mut groups, grandchild, g);
+                        if let Some((g, matched)) = unique(&tree.node(grandchild).name) {
+                            let inside = Some(tree.node(child).name.to_string());
+                            claim(&tree, &mut owner, &mut groups, grandchild, g, named(grandchild, matched, inside));
                         }
                     }
                 }
@@ -348,7 +408,7 @@ impl View {
                     .locations
                     .iter()
                     .filter(|&&l| self.eff[l as usize] > 0)
-                    .map(|&l| Location { path: self.tree.path(l).display().to_string(), size: self.eff[l as usize] })
+                    .map(|&l| Location { path: self.tree.path(l).display().to_string(), size: self.eff[l as usize], claim: group.claims.get(&l).cloned() })
                     .collect();
                 (group.name.clone(), "app", locations.first().map(|l| l.path.clone()), locations, true)
             }
@@ -377,7 +437,11 @@ impl View {
         let key = id.key();
         let categories = matches!(id, Id::Root).then(|| self.category_totals());
         let linked = self.linked(id.clone());
-        ViewNode { id: key, name, size: self.size(id.clone()), kind, category: self.category(id), path, locations, has_children, children: None, categories, linked }
+        let claim = match id {
+            Id::Node(n) if self.owner[n as usize] != UNOWNED => self.groups[self.owner[n as usize] as usize].claims.get(&n).cloned(),
+            _ => None,
+        };
+        ViewNode { id: key, name, size: self.size(id.clone()), kind, category: self.category(id), path, locations, has_children, children: None, categories, linked, claim }
     }
 
     /// The node plus `depth` levels of children, largest first. Long tails are bundled into one "more" entry.
@@ -421,6 +485,7 @@ impl View {
                 children: None,
                 categories: None,
                 linked: kids[limit..].iter().map(|k| self.linked(k.clone())).sum(),
+                claim: None,
             });
         }
         v.children = Some(out);
@@ -443,7 +508,7 @@ fn short_location(path: &str) -> String {
     }
 }
 
-fn claim(tree: &Tree, owner: &mut [u32], groups: &mut [Group], node: u32, g: u32) {
+fn claim(tree: &Tree, owner: &mut [u32], groups: &mut [Group], node: u32, g: u32, why: Claim) {
     if node == Tree::ROOT || tree.node(node).kind != NodeKind::Dir || owner[node as usize] != UNOWNED {
         return;
     }
@@ -457,6 +522,7 @@ fn claim(tree: &Tree, owner: &mut [u32], groups: &mut [Group], node: u32, g: u32
     }
     owner[node as usize] = g;
     groups[g as usize].locations.push(node);
+    groups[g as usize].claims.insert(node, why);
 }
 
 /// `ProgramData` plus every profile's `AppData\Local`, `Roaming` and `LocalLow`.
@@ -491,7 +557,7 @@ mod tests {
     }
 
     fn app(root: &Path, name: &str, publisher: &str, rel: &str, steam: bool) -> InstalledApp {
-        InstalledApp { name: name.into(), publisher: publisher.into(), location: root.join(rel), steam }
+        InstalledApp { name: name.into(), publisher: publisher.into(), location: root.join(rel), from: LocationSource::InstallLocation, steam }
     }
 
     fn find_group<'a>(v: &'a View, name: &str) -> (u32, &'a Group) {
@@ -531,6 +597,79 @@ mod tests {
         let tree = scan(r, &Progress::default());
         let view = View::build(tree, &apps);
         (dir, view)
+    }
+
+    /// Each folder an app claimed says which rule claimed it, so the UI can say why it is there.
+    /// Forward slashes, so this runs on every platform.
+    #[test]
+    fn every_claimed_folder_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, "Program Files/Docker/Docker/app.bin", 4);
+        write(r, "Users/me/AppData/Local/Docker/wsl/disk.vhdx", 50);
+        write(r, "Program Files/Adobe/Photoshop/ps.bin", 7);
+        write(r, "Program Files/Adobe/Premiere/pr.bin", 9);
+        write(r, "Users/me/AppData/Roaming/Adobe/cache.bin", 30);
+        write(r, "Users/me/AppData/Local/Google/Chrome/User Data/profile.bin", 3);
+        write(r, "Program Files/Google/Chrome/Application/chrome.bin", 2);
+        write(r, "ProgramData/Spotify/cache.bin", 2);
+        write(r, "Users/me/AppData/Roaming/Spotify/Spotify.exe", 2);
+        let mut spotify = app(r, "Spotify", "Spotify AB", "Users/me/AppData/Roaming/Spotify", false);
+        spotify.from = LocationSource::DisplayIcon;
+        let apps = vec![
+            app(r, "Docker Desktop", "Docker Inc.", "Program Files/Docker/Docker", false),
+            app(r, "Adobe Photoshop 2025", "Adobe Inc.", "Program Files/Adobe/Photoshop", false),
+            app(r, "Adobe Premiere Pro 2025", "Adobe Inc.", "Program Files/Adobe/Premiere", false),
+            app(r, "Google Chrome", "Google LLC", "Program Files/Google/Chrome/Application", false),
+            spotify,
+        ];
+        let v = View::build(scan(r, &Progress::default()), &apps);
+        let claims = |name: &str| -> Vec<(String, Claim)> {
+            let (g, _) = find_group(&v, name);
+            let mut out: Vec<(String, Claim)> = v
+                .view(Id::Group(g), 0)
+                .locations
+                .into_iter()
+                .map(|l| (l.path.replace('\\', "/").split_once(&*r.to_string_lossy().replace('\\', "/")).unwrap().1.to_string(), l.claim.expect("every location has a reason")))
+                .collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        };
+        let container = |c: &[(String, Claim)], i: usize| match &c[i].1 {
+            Claim::Named { container, .. } => container.replace('\\', "/"),
+            other => panic!("{other:?}"),
+        };
+
+        // Docker installs into Program Files\Docker\Docker, a folder inside one named after its
+        // publisher, so the whole publisher folder is counted with it.
+        let docker = claims("Docker Desktop");
+        assert_eq!(docker[0], ("/Program Files/Docker".into(), Claim::Publisher { publisher: "Docker Inc.".into(), apps: vec!["Docker Desktop".into()] }));
+        assert!(container(&docker, 1).ends_with("AppData/Local"), "{docker:?}");
+        assert!(matches!(&docker[1].1, Claim::Named { name, matched: Matched::Publisher(p), inside: None, .. } if name == "Docker" && p == "Docker Inc."), "{docker:?}");
+
+        let adobe = claims("Adobe");
+        let both = vec!["Adobe Photoshop 2025".to_string(), "Adobe Premiere Pro 2025".to_string()];
+        assert_eq!(adobe[0].1, Claim::Publisher { publisher: "Adobe Inc.".into(), apps: both });
+        assert!(matches!(&adobe[1].1, Claim::Named { matched: Matched::Publisher(p), .. } if p == "Adobe Inc."), "{adobe:?}");
+
+        let chrome = claims("Google Chrome");
+        assert_eq!(chrome[0], ("/Program Files/Google/Chrome/Application".into(), Claim::Install { app: "Google Chrome".into(), from: LocationSource::InstallLocation }));
+        assert!(
+            matches!(&chrome[1].1, Claim::Named { name, matched: Matched::InstallFolder(f), inside: Some(i), .. } if name == "Chrome" && f == "Chrome" && i == "Google"),
+            "one level down, inside the publisher's folder: {chrome:?}"
+        );
+
+        let spotify = claims("Spotify");
+        assert!(matches!(&spotify[0].1, Claim::Named { matched: Matched::InstallFolder(f), .. } if f == "Spotify"), "{spotify:?}");
+        assert!(container(&spotify, 0).ends_with("ProgramData"), "{spotify:?}");
+        assert_eq!(spotify[1].1, Claim::Install { app: "Spotify".into(), from: LocationSource::DisplayIcon });
+
+        // A claimed folder carries its reason in the view as well.
+        let (g, _) = find_group(&v, "Docker Desktop");
+        let kids = v.view(Id::Group(g), 1).children.unwrap();
+        assert!(kids.iter().all(|k| k.claim.is_some()), "{kids:?}");
+        let users = v.tree.find(&r.join("Users")).unwrap();
+        assert_eq!(v.view(Id::Node(users), 0).claim, None, "an unclaimed folder has none");
     }
 
     /// A hard link inside an app's data counts once, at the install folder that comes first,
