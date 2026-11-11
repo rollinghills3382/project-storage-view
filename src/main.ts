@@ -252,7 +252,8 @@ function renderToolbar() {
       h(
         "button",
         { class: "drive", "aria-pressed": String(d.mount === cur?.mount), title: `${d.kind} · ${d.file_system}`, onclick: () => run(() => showDrive(d)) },
-        h("span", { class: "dl" }, h("b", {}, driveLetter(d.mount)), ` ${d.label || (d.removable ? "USB Drive" : "Local Disk")} · ${d.kind}`),
+        h("span", { class: "dl" }, driveLetter(d.mount)),
+        h("span", { class: "dn" }, h("span", {}, d.label || (d.removable ? "USB Drive" : "Local Disk")), h("span", { class: "dim" }, d.kind)),
         h("span", { class: "meter" }, h("i", { style: `width:${((d.total - d.free) / d.total) * 100}%` })),
         h("span", { class: "dm" }, `${fmtBytes(d.free)} free of ${fmtBytes(d.total)}${scanOf(d) ? "" : " · not scanned"}`),
       ),

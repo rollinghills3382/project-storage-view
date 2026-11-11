@@ -101,7 +101,9 @@ export function createTreemap(on: TreemapEvents) {
       const hgt = d.y1 - d.y0;
       if (w < 1 || hgt < 1) return;
       const group = isGroup(d);
-      const tile = h("div", { class: group ? "tile group" : "tile", style: `${place(d)};--c:${catColor(d.data.category)}` });
+      // Bundled small files and "smaller items" are areas, not single things, and are drawn hatched.
+      const bundle = d.data.kind === "files" || d.data.kind === "more";
+      const tile = h("div", { class: group ? "tile group" : bundle ? "tile bundle" : "tile", style: `${place(d)};--c:${catColor(d.data.category)}` });
       tiles.set(tile, d);
       if (group) {
         tile.append(h("div", { class: "hd" }, h("span", {}, d.data.name), w > 120 && h("span", { class: "sz" }, fmtBytes(d.data.size))));
