@@ -1,159 +1,185 @@
 /* Layout: full-window app. Drives and scan actions | Map/List tabs and location | the view | legend, selection, status.
-   Plain desktop-utility chrome: system font at 12px, square corners, 1px rules, no shadows. */
+   Look: a survey map. Warm paper ground, ink rules, muted cartographic tints for categories, hatching for
+   bundled small files, one vermilion accent for the selection. Labels in Bahnschrift (a DIN face that ships
+   with Windows), figures in a monospace. Square corners, no shadows, no cards. */
 :root {
-  --bg: #ffffff;
-  --panel: #f3f3f3;
-  --fg: #1a1a1a;
-  --muted: #5c5c5c;
-  --line: #cfcfcf;
-  --row-line: #ececec;
-  --hover: #eef5fc;
-  --sel: #cce4f7;
-  --bar: #5b8fc7;
-  --track: #e4e4e4;
-  --on-cat: #ffffff;
+  --bg: #f4f1ea;
+  --panel: #ebe6da;
+  --fg: #1d1c19;
+  --muted: #6b665b;
+  --line: #c6bfae;
+  --row-line: #e1dbcd;
+  --hover: #e7e1d2;
+  --sel: #f3d8cb;
+  --ink: #2a2824;
+  --accent: #c8402a;
+  --track: #dcd5c5;
+  --on-cat: #fbf9f4;
+  --tile-ink: #1d1c19;
+  --tint: 38%;
   --warn: #8a5300;
   --danger: #b42318;
 
-  --c-games: #6a4cc7;
-  --c-creative: #c03d68;
-  --c-dev: #2767ad;
-  --c-productivity: #2a834a;
-  --c-media: #bd5a1c;
-  --c-user: #0d6f8a;
-  --c-system: #58616f;
-  --c-other: #7d6b5a;
+  /* Map colors: rust, madder, slate, moss, ochre, sea, graphite, umber. */
+  --c-games: #b0532c;
+  --c-creative: #9e3a52;
+  --c-dev: #3e5e86;
+  --c-productivity: #5a7a38;
+  --c-media: #b3842a;
+  --c-user: #2c7673;
+  --c-system: #5d5a52;
+  --c-other: #85694f;
 
+  --f-ui: Bahnschrift, "DIN Alternate", "Segoe UI", system-ui, sans-serif;
   --f-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1e1e1e;
-    --panel: #272727;
-    --fg: #e4e4e4;
-    --muted: #a3a3a3;
-    --line: #3c3c3c;
-    --row-line: #2a2a2a;
-    --hover: #26323d;
-    --sel: #1f4a6e;
-    --bar: #4d83bd;
-    --track: #383838;
+    --bg: #181714;
+    --panel: #201f1b;
+    --fg: #ebe5d7;
+    --muted: #9c9587;
+    --line: #3b3832;
+    --row-line: #27251f;
+    --hover: #2a2823;
+    --sel: #4a2a20;
+    --ink: #ebe5d7;
+    --accent: #ef6a4c;
+    --track: #34312b;
+    --on-cat: #fbf9f4;
+    --tile-ink: #f1ece0;
+    --tint: 44%;
     --warn: #e0a54a;
     --danger: #f97066;
-    --c-games: #7a5ddb;
-    --c-creative: #cc4d77;
-    --c-dev: #3478c2;
-    --c-productivity: #339457;
-    --c-media: #c9672a;
-    --c-user: #17819e;
-    --c-system: #667080;
-    --c-other: #8c7a68;
+    --c-games: #c5653a;
+    --c-creative: #b84e68;
+    --c-dev: #5577a3;
+    --c-productivity: #6e9147;
+    --c-media: #c49636;
+    --c-user: #3a8c88;
+    --c-system: #747065;
+    --c-other: #9a7d61;
     color-scheme: dark;
   }
 }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
-body { background: var(--bg); color: var(--fg); font: 12px/1.4 "Segoe UI", system-ui, sans-serif; overflow: hidden; }
+body { background: var(--bg); color: var(--fg); font: 12px/1.4 var(--f-ui); overflow: hidden; }
 #app { height: 100%; display: grid; grid-template-rows: auto auto minmax(0, 1fr); grid-auto-rows: auto; }
 button { font: inherit; color: inherit; }
-:focus-visible { outline: 2px solid var(--bar); outline-offset: -1px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 [hidden] { display: none !important; }
 .grow { flex: 1; }
 .dim { color: var(--muted); }
 
-.btn { height: 24px; padding: 0 10px; border: 1px solid var(--line); background: var(--bg); border-radius: 2px; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
-.btn:hover:not(:disabled) { border-color: var(--muted); }
-.btn:disabled { color: var(--muted); opacity: 0.6; cursor: default; }
+.btn { height: 24px; padding: 0 10px; border: 1px solid var(--ink); background: transparent; border-radius: 0; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
+.btn:disabled { border-color: var(--line); color: var(--muted); cursor: default; }
 .meter { display: block; height: 6px; background: var(--track); }
-.meter i { display: block; height: 100%; background: var(--bar); }
+.meter i { display: block; height: 100%; background: var(--ink); }
 .sw { flex: none; width: 9px; height: 9px; display: inline-block; }
 
 /* Drives and scan actions */
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px 6px; background: var(--panel); border-bottom: 1px solid var(--line); }
-.tsep { flex: none; width: 1px; height: 16px; background: var(--line); margin: 0 4px; }
-.drive { flex: 0 1 220px; min-width: 150px; display: grid; gap: 3px; padding: 4px 8px 5px; border: 1px solid var(--line); background: var(--bg); border-radius: 2px; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; }
-.drive:hover { border-color: var(--muted); }
-.drive[aria-pressed="true"] { background: var(--sel); border-color: var(--bar); }
-.drive .dl { overflow: hidden; text-overflow: ellipsis; }
-.drive .dm { color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--ink); }
+.tsep { flex: none; width: 1px; height: 28px; background: var(--line); margin: 0 4px; }
+/* A drive reads like a map's scale bar: the letter large, a ruled meter, the figures under it. */
+.drive { flex: 0 1 260px; min-width: 170px; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto auto; column-gap: 8px; row-gap: 3px; align-items: center; padding: 3px 8px 4px 4px; border: 0; border-left: 3px solid transparent; background: none; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; }
+.drive:hover { background: var(--hover); }
+.drive[aria-pressed="true"] { border-left-color: var(--accent); background: var(--bg); }
+.drive .dl { grid-column: 1; grid-row: 1 / 4; font-size: 24px; line-height: 1; font-weight: 700; letter-spacing: -0.02em; }
+.drive .dn { grid-column: 2; grid-row: 1; display: flex; gap: 8px; min-width: 0; }
+.drive .dn span { overflow: hidden; text-overflow: ellipsis; }
+.drive .dm { grid-column: 2; grid-row: 3; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font: 10.5px var(--f-mono); }
+.drive .meter { grid-column: 2; grid-row: 2; height: 5px; background: repeating-linear-gradient(90deg, var(--track) 0 9px, var(--bg) 9px 10px); }
 
 /* View tabs and location */
-.nav { display: flex; align-items: center; gap: 4px; height: 30px; padding-right: 6px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
-.tabs { display: flex; align-self: stretch; margin-right: 6px; }
-.tabs button { padding: 0 18px; border: 0; border-right: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; }
+.nav { display: flex; align-items: center; gap: 6px; height: 30px; padding-right: 8px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
+.tabs { display: flex; align-self: stretch; margin-right: 4px; }
+.tabs button { padding: 0 16px; border: 0; border-right: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; }
 .tabs button:hover { color: var(--fg); }
-.tabs button[aria-selected="true"] { background: var(--bg); color: var(--fg); font-weight: 600; box-shadow: inset 0 2px 0 var(--bar); }
+.tabs button[aria-selected="true"] { background: var(--bg); color: var(--fg); box-shadow: inset 0 -3px 0 var(--accent); }
 .crumbs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; }
 .crumbs button { border: 0; background: none; padding: 2px 4px; cursor: pointer; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .crumbs button:hover { background: var(--hover); }
-.crumbs button[aria-current="page"] { font-weight: 600; cursor: default; background: none; }
+.crumbs button[aria-current="page"] { font-weight: 700; cursor: default; background: none; }
 .crumbs .sep { color: var(--muted); }
-.search { flex: 0 1 220px; min-width: 120px; height: 22px; padding: 0 6px; border: 1px solid var(--line); border-radius: 2px; background: var(--bg); color: var(--fg); font: inherit; }
-.search:disabled { opacity: 0.6; }
-.nav .total { padding: 0 6px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.search { flex: 0 1 220px; min-width: 120px; height: 22px; padding: 0 6px; border: 0; border-bottom: 1px solid var(--ink); border-radius: 0; background: transparent; color: var(--fg); font: inherit; }
+.search::placeholder { color: var(--muted); }
+.search:focus-visible { outline: 0; border-bottom: 2px solid var(--accent); }
+.search:disabled { opacity: 0.6; border-bottom-color: var(--line); }
+.nav .total { padding: 0 6px; color: var(--muted); font-family: var(--f-mono); font-size: 11px; }
 
-/* Map: flat tiles in their category color, 1px gaps, a darker name strip on blocks that show their contents */
+/* Map: leaves are light tints of their category with ink labels, like land on a survey map. A block
+   that shows its contents is drawn in the full color: its name strip and the rules around its tiles.
+   Bundled small files and "smaller items" are hatched, because they are areas, not single things. */
 .view { position: relative; min-height: 0; min-width: 0; display: grid; }
-.map { position: relative; min-height: 0; min-width: 0; overflow: hidden; user-select: none; cursor: default; }
-.tile { position: absolute; overflow: hidden; padding: 1px 4px; font-size: 11px; line-height: 14px; white-space: nowrap; background: var(--c); color: var(--on-cat); }
-.tile.group { padding: 0; background: color-mix(in srgb, var(--c) 62%, #000); }
-.tile .hd { display: flex; justify-content: space-between; gap: 8px; height: 16px; padding: 1px 4px; font-weight: 600; }
+.map { position: relative; min-height: 0; min-width: 0; overflow: hidden; user-select: none; cursor: default; background: var(--ink); }
+.tile { position: absolute; overflow: hidden; padding: 1px 4px; font-size: 11px; line-height: 14px; white-space: nowrap; background: color-mix(in srgb, var(--c) var(--tint), var(--bg)); color: var(--tile-ink); }
+.tile.group { padding: 0; background: var(--c); color: var(--on-cat); }
+.tile.bundle { background: repeating-linear-gradient(-45deg, color-mix(in srgb, var(--c) calc(var(--tint) + 22%), var(--bg)) 0 1.5px, color-mix(in srgb, var(--c) calc(var(--tint) - 12%), var(--bg)) 1.5px 6px); }
+.tile .hd { display: flex; justify-content: space-between; gap: 8px; height: 16px; padding: 1px 4px; font-weight: 700; font-stretch: semi-condensed; letter-spacing: 0.01em; }
 .tile .hd span, .tile > span { overflow: hidden; text-overflow: ellipsis; }
-.tile .hd .sz { flex: none; font-weight: 400; font-variant-numeric: tabular-nums; }
-.tile > span { display: block; }
-.tile > .sz { opacity: 0.82; font-variant-numeric: tabular-nums; }
-.tile:hover { box-shadow: inset 0 0 0 1px var(--on-cat); }
-.mark { position: absolute; z-index: 1; pointer-events: none; border: 2px solid var(--fg); outline: 1px solid var(--bg); }
-.tip { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; display: grid; gap: 1px; max-width: 420px; padding: 4px 7px; background: var(--bg); border: 1px solid var(--muted); font-variant-numeric: tabular-nums; }
-.tip b { font-weight: 600; }
+.tile .hd .sz { flex: none; font: 10px/14px var(--f-mono); opacity: 0.85; }
+.tile > span { display: block; font-stretch: semi-condensed; }
+.tile > .sz { font: 10px/13px var(--f-mono); opacity: 0.72; }
+.tile:not(.group):hover { background: color-mix(in srgb, var(--c) calc(var(--tint) + 18%), var(--bg)); }
+.tile.bundle:hover { background: repeating-linear-gradient(-45deg, color-mix(in srgb, var(--c) calc(var(--tint) + 34%), var(--bg)) 0 1.5px, color-mix(in srgb, var(--c) var(--tint), var(--bg)) 1.5px 6px); }
+/* The selection is a double rule, ink inside paper, so it reads on every category color. */
+.mark { position: absolute; z-index: 1; pointer-events: none; border: 2px solid var(--fg); outline: 1px solid var(--bg); box-shadow: inset 0 0 0 1px var(--bg); }
+.tip { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; display: grid; gap: 1px; max-width: 420px; padding: 5px 8px; background: var(--bg); border: 1px solid var(--ink); border-left: 3px solid var(--accent); }
+.tip b { font-weight: 700; }
 .tip span { overflow-wrap: anywhere; }
-.empty { place-self: center; display: grid; gap: 8px; justify-items: center; color: var(--muted); }
+.tip span:nth-child(2) { font-family: var(--f-mono); font-size: 11px; }
+.empty { place-self: center; display: grid; gap: 10px; justify-items: center; color: var(--muted); }
 
 /* List */
 .tw { display: block; overflow: auto; }
 table.grid { border-collapse: separate; border-spacing: 0; width: 100%; table-layout: fixed; }
-.grid th { position: sticky; top: 0; z-index: 1; height: 24px; padding: 0 8px; background: var(--panel); border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); text-align: left; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
-.grid th:last-child { border-right: 0; }
+.grid th { position: sticky; top: 0; z-index: 1; height: 24px; padding: 0 8px; background: var(--panel); border-bottom: 1px solid var(--ink); text-align: left; font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
 .grid th.sortable { cursor: pointer; }
-.grid th.sortable:hover { background: var(--track); }
+.grid th.sortable:hover { color: var(--fg); }
 .grid td { height: 22px; padding: 0 8px; border-bottom: 1px solid var(--row-line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.grid .num { text-align: right; font-variant-numeric: tabular-nums; }
+.grid .num { text-align: right; font: 11px var(--f-mono); }
 .grid tbody tr { cursor: default; }
 .grid tbody tr:hover td { background: var(--hover); }
 .grid tbody tr.sel td { background: var(--sel); }
-.name { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.grid tbody tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.name { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .name span { overflow: hidden; text-overflow: ellipsis; }
 .arrow { flex: none; width: 14px; height: 14px; padding: 0; border: 0; background: none; font-size: 8px; line-height: 14px; color: var(--muted); cursor: pointer; }
 .arrow:hover { color: var(--fg); }
 .arrow.none { visibility: hidden; }
-.pc { display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 6px; align-items: center; font-variant-numeric: tabular-nums; text-align: right; }
-.pc .meter { height: 10px; }
+.pc { display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 6px; align-items: center; text-align: right; font: 11px var(--f-mono); }
+.pc .meter { height: 4px; }
 
 /* Search results: a line saying what was found above a list like the List tab's */
 .results { grid-template-rows: auto minmax(0, 1fr); }
-.results .found { display: flex; gap: 16px; padding: 3px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
+.results .found { display: flex; gap: 16px; padding: 3px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
 .results .found .dim { overflow: hidden; text-overflow: ellipsis; }
 
-/* Legend, selection, status */
-.legend, .selbar, .status { display: flex; align-items: center; gap: 4px 16px; min-height: 24px; padding: 2px 8px; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
-.legend span { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
-.legend b { color: var(--fg); font-weight: 400; }
-.selbar b { font-weight: 600; }
+/* Legend, selection, status: the legend is the map's key, so it sits on the paper with ink figures. */
+.legend, .selbar, .status { display: flex; align-items: center; gap: 4px 16px; min-height: 24px; padding: 2px 8px; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
+.legend { border-top: 1px solid var(--ink); }
+.legend span { display: inline-flex; align-items: baseline; gap: 5px; color: var(--muted); font: 11px var(--f-mono); }
+.legend b { color: var(--fg); font: 600 12px var(--f-ui); }
+.legend .sw { align-self: center; }
+.selbar b { font-weight: 700; }
+.selbar > span { font-variant-numeric: tabular-nums; }
 .selbar .why { color: var(--muted); cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
-.selbar .p { overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-family: var(--f-mono); }
-.status { background: var(--panel); color: var(--muted); }
+.selbar .p { overflow: hidden; text-overflow: ellipsis; color: var(--muted); font: 11px var(--f-mono); }
+.status { background: var(--panel); color: var(--muted); font-variant-numeric: tabular-nums; }
 .status .warn { color: var(--warn); }
 .status .note[title]:not([title=""]) { cursor: help; }
 .status .err { color: var(--danger); overflow: hidden; text-overflow: ellipsis; }
-.status .cur { overflow: hidden; text-overflow: ellipsis; }
-.status .prog { flex: none; width: 120px; height: 8px; background: var(--track); overflow: hidden; }
-.status .prog i { display: block; width: 30%; height: 100%; background: var(--bar); animation: sweep 1.2s linear infinite; }
+.status .cur { overflow: hidden; text-overflow: ellipsis; font: 11px var(--f-mono); }
+.status .prog { flex: none; width: 120px; height: 6px; background: var(--track); overflow: hidden; }
+.status .prog i { display: block; width: 30%; height: 100%; background: var(--accent); animation: sweep 1.2s linear infinite; }
 @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(400%); } }
 .badge { display: inline-flex; align-items: center; gap: 5px; color: var(--fg); }
 /* The Windows UAC shield, drawn in CSS so it follows the theme. */
-.shield { width: 11px; height: 13px; flex: none; display: inline-block; background: linear-gradient(90deg, var(--c-dev) 50%, var(--warn) 50%); clip-path: polygon(50% 0, 100% 18%, 100% 55%, 50% 100%, 0 55%, 0 18%); }
+.shield { width: 11px; height: 13px; flex: none; display: inline-block; background: linear-gradient(90deg, var(--c-dev) 50%, var(--c-media) 50%); clip-path: polygon(50% 0, 100% 18%, 100% 55%, 50% 100%, 0 55%, 0 18%); }
 
 @media (prefers-reduced-motion: reduce) {
   .status .prog i { animation: none; width: 100%; opacity: 0.5; }

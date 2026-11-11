@@ -57,8 +57,12 @@ on a Windows runner whenever the scanner changes and compares WinSxS with DISM's
   solid. Click selects, double-click zooms in.
 - **Map and List are separate tabs.** The list is a sortable tree of the same data. The selection
   carries across, so switching tabs shows the selected item in the other view.
-- **Look:** plain desktop-utility chrome. System font at 12px, square corners, 1px rules, no
-  cards, shadows or popups. Color is reserved for the map and its legend.
+- **Look:** a survey map. Warm paper ground with ink rules, square corners, no cards, shadows
+  or popups. Labels are in Bahnschrift (the DIN face that ships with Windows) and figures in
+  Cascadia Mono. Categories use muted cartographic colors: a block that shows its contents is
+  drawn in the full color, the tiles inside it in a light tint with ink labels, and bundled
+  small files are hatched. Vermilion marks the current drive, tab and list row; the map's
+  selection is an ink-and-paper double rule so it reads on every color.
 - **Grouping:** by owning application, including data outside its install folder. An app opens
   into every location it occupies. Selecting an app, or one of its folders, shows *Why here* in
   the selection bar; hovering it names the rule that claimed each folder (its install folder,
